@@ -38,6 +38,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.DEFAULT_BASE_URL, "https://work.freemodel.dev/v1")
         self.assertEqual(config.TRANSPORT, "workbuddy_acp")
         self.assertEqual(config.WORKBUDDY_CLI_PATH, "codebuddy")
+        self.assertEqual(config.DEFAULT_HOST, "127.0.0.1")
+        self.assertEqual(config.PROXY_API_KEY, "")
+
+    def test_local_proxy_key_is_read_from_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(
+                Path(directory) / "config.json",
+                {"PROXY_API_KEY": " local-secret "},
+            )
+
+        self.assertEqual(config.PROXY_API_KEY, "local-secret")
 
     def test_reads_saved_base_url_and_strips_trailing_slash(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -69,6 +69,11 @@ Start the proxy and dashboard:
 
 The launcher reuses a healthy listener on port `40589`, starts a hidden background process when needed, waits for `/health`, and opens the dashboard. The desktop shortcut created by the local setup performs the same workflow.
 
+The Windows launcher uses the Python ACP runtime. The Rust TUI and Rust
+sidecar lifecycle currently target Unix/Linux because they use Unix process
+groups and `/proc`; a native Windows Rust build is not part of the supported
+Windows path.
+
 The direct server script is also available:
 
 ```powershell

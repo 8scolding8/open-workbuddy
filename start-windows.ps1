@@ -5,7 +5,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $MyInvocation.MyCommand.Path
-$cli = Join-Path $env:LOCALAPPDATA 'Programs\WorkBuddy\resources\app.asar.unpacked\cli\bin\codebuddy'
+$configuredCli = [Environment]::GetEnvironmentVariable('WORKBUDDY_CLI_PATH')
+$cli = if ([string]::IsNullOrWhiteSpace($configuredCli)) {
+    Join-Path $env:LOCALAPPDATA 'Programs\WorkBuddy\resources\app.asar.unpacked\cli\bin\codebuddy'
+} else {
+    [Environment]::ExpandEnvironmentVariables($configuredCli.Trim())
+}
 
 if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) {
     throw "WorkBuddy codebuddy launcher was not found at $cli. Set WORKBUDDY_CLI_PATH to the installed launcher and rerun."

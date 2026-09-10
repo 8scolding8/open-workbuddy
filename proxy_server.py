@@ -9,6 +9,7 @@ import getpass
 import httpx
 import json
 import logging
+import secrets
 import sys
 import time
 import uuid
@@ -69,7 +70,10 @@ _workbuddy_gateway_locks: dict[str, asyncio.Lock] = {}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # The proxy does not use browser cookies. Credentialed wildcard CORS is
+    # invalid in browsers and needlessly widens the exposure if the bind host
+    # is changed from loopback.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -82,7 +86,6 @@ def normalize_model(model_name: str | None) -> str:
         return sidecar_manager.model
     cleaned = model_name.strip().lower()
     aliases = {
-        "hy3",
         "hy3",
         "gpt-5.6",
         "gpt 5.6",
@@ -98,16 +101,32 @@ def normalize_model(model_name: str | None) -> str:
     return model_name
 
 
+def incoming_bearer_token(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        return ""
+    return auth.removeprefix("Bearer ").strip()
+
+
+def proxy_auth_allowed(request: Request) -> bool:
+    """Check the optional local key without forwarding it upstream."""
+    expected = config.PROXY_API_KEY
+    if not expected:
+        return True
+    supplied = incoming_bearer_token(request)
+    return bool(supplied) and secrets.compare_digest(supplied, expected)
+
+
 def get_auth_token(request: Request) -> str:
-    """Extract the Authorization header or fall back to the configured key."""
-    auth = request.headers.get("authorization")
-    if auth and auth.startswith("Bearer "):
-        token = auth.removeprefix("Bearer ").strip()
-        if token and token not in {"sk-dummy", "dummy", "placeholder"}:
-            return f"Bearer {token}"
-    key = config.DEFAULT_API_KEY or config.load_saved_key()
-    if key:
-        return f"Bearer {key}"
+    """Return only the configured upstream key, never the local proxy key."""
+    configured = config.DEFAULT_API_KEY or config.load_saved_key()
+    if configured:
+        return f"Bearer {configured}"
+    if config.PROXY_API_KEY:
+        return ""
+    auth = incoming_bearer_token(request)
+    if auth and auth not in {"sk-dummy", "dummy", "placeholder"}:
+        return f"Bearer {auth}"
     return ""
 
 
@@ -600,7 +619,10 @@ async def dashboard():
 
 
 @app.get("/v1/models")
-async def list_models():
+async def list_models(request: Request):
+    denied = proxy_auth_allowed(request)
+    if not denied:
+        return error_json(401, "Invalid proxy API key", "authentication_error")
     config.refresh_available_models()
     return {"object": "list", "data": AVAILABLE_MODELS}
 
@@ -738,6 +760,8 @@ async def delete_proxy_session(session_id: str, request: Request):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
+    if not proxy_auth_allowed(request):
+        return error_json(401, "Invalid proxy API key", "authentication_error")
     try:
         body = await request.json()
     except Exception:
@@ -918,6 +942,8 @@ async def chat_completions(request: Request):
 @app.post("/v1/responses")
 async def responses_endpoint(request: Request):
     """Adapt the OpenAI Responses API to the upstream Chat Completions API."""
+    if not proxy_auth_allowed(request):
+        return error_json(401, "Invalid proxy API key", "authentication_error")
     try:
         body = await request.json()
     except Exception:

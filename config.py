@@ -91,6 +91,10 @@ DEFAULT_BASE_URL = (
     or DEFAULT_WORKBUDDY_BASE_URL
 ).rstrip("/")
 DEFAULT_API_KEY = os.environ.get("FREEMODEL_API_KEY") or load_saved_key()
+PROXY_API_KEY = str(
+    os.environ.get("PROXY_API_KEY")
+    or load_saved_value("PROXY_API_KEY", "")
+).strip()
 
 TRANSPORT = str(
     os.environ.get("FREEMODEL_TRANSPORT")
@@ -472,7 +476,7 @@ def refresh_available_models() -> list[dict]:
     return AVAILABLE_MODELS
 
 DEFAULT_PORT = int(os.environ.get("PROXY_PORT", "40589"))
-DEFAULT_HOST = os.environ.get("PROXY_HOST", "0.0.0.0").strip()
+DEFAULT_HOST = os.environ.get("PROXY_HOST", "127.0.0.1").strip()
 if not 1 <= DEFAULT_PORT <= 65535:
     raise ValueError("PROXY_PORT must be between 1 and 65535")
 if not DEFAULT_HOST:

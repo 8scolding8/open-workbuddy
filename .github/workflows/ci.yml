@@ -20,11 +20,18 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo check --all-targets
+      - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets
+      - run: cargo test --release --all-targets
+      - run: cargo test --doc
 
   python:
-    name: Python compatibility tests
-    runs-on: ubuntu-latest
+    name: Python compatibility tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

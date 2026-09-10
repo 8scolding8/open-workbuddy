@@ -223,7 +223,10 @@ class SessionStore:
             for record in data["sessions"].values():
                 sidecar = record.get("sidecar") or {}
                 pid = sidecar.get("pid")
-                if pid and not Path(f"/proc/{pid}").exists():
+                # The Windows manager deliberately does not adopt persisted
+                # PIDs because it cannot prove ownership safely. Clear the
+                # record and let it create a fresh sidecar on demand.
+                if pid and (os.name == "nt" or not Path(f"/proc/{pid}").exists()):
                     record["sidecar"] = {}
                     changed = True
             if changed:
