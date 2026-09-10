@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171915">
+  <title>WorkBuddy Proxy · Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: oklch(0.16 0.018 95);
+      --bg-deep: oklch(0.125 0.018 95);
+      --panel: oklch(0.205 0.024 95);
+      --panel-raised: oklch(0.235 0.028 95);
+      --panel-soft: oklch(0.185 0.02 95);
+      --line: oklch(0.34 0.028 95);
+      --line-soft: oklch(0.27 0.022 95);
+      --text: oklch(0.93 0.025 95);
+      --muted: oklch(0.68 0.028 95);
+      --faint: oklch(0.51 0.025 95);
+      --lime: oklch(0.82 0.16 113);
+      --lime-deep: oklch(0.66 0.13 113);
+      --lime-soft: oklch(0.31 0.065 113);
+      --amber: oklch(0.82 0.13 78);
+      --red: oklch(0.72 0.16 25);
+      --blue: oklch(0.75 0.11 230);
+      --radius: 14px;
+      --radius-sm: 9px;
+      --shadow: 0 20px 70px rgba(0, 0, 0, 0.2);
+      --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.5;
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: wait; opacity: 0.55; }
+    code, pre, .mono { font-family: var(--mono); }
+    a { color: inherit; }
+
+    .app-shell { min-height: 100vh; display: grid; grid-template-columns: 250px minmax(0, 1fr); }
+    .sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 22px 16px 16px;
+      background: var(--bg-deep);
+      border-right: 1px solid var(--line-soft);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; padding: 0 10px 25px; }
+    .brand-mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border: 1px solid color-mix(in oklab, var(--lime) 55%, transparent);
+      border-radius: 10px;
+      background: var(--lime-soft);
+      color: var(--lime);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+    .brand-copy { display: grid; gap: 1px; }
+    .brand-copy strong { font-size: 14px; letter-spacing: -0.02em; }
+    .brand-copy span { color: var(--faint); font-size: 11px; }
+    .nav-label { padding: 0 10px 8px; color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+    .nav { display: grid; gap: 4px; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 10px 11px;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+      transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+    }
+    .nav-item:hover { transform: translateX(2px); color: var(--text); background: var(--panel-soft); }
+    .nav-item.active { border-color: var(--line); background: var(--panel); color: var(--text); }
+    .nav-glyph { width: 18px; color: var(--faint); text-align: center; font-size: 15px; }
+    .nav-item.active .nav-glyph { color: var(--lime); }
+    .sidebar-spacer { flex: 1; }
+    .sidebar-note { margin: 12px 8px 0; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--panel-soft); }
+    .sidebar-note .eyebrow { color: var(--lime); }
+    .sidebar-note p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+
+    .workspace { min-width: 0; }
+    .topbar {
+      position: sticky;
+      z-index: 5;
+      top: 0;
+      display: flex;
+      min-height: 65px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 38px;
+      border-bottom: 1px solid var(--line-soft);
+      background: color-mix(in oklab, var(--bg) 88%, transparent);
+      backdrop-filter: blur(16px);
+    }
+    .crumbs { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+    .crumbs strong { color: var(--text); font-weight: 650; }
+    .crumb-separator { color: var(--faint); }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-soft); color: var(--muted); font-size: 12px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--lime); box-shadow: 0 0 0 4px color-mix(in oklab, var(--lime) 13%, transparent); }
+    .status-dot.offline { background: var(--red); box-shadow: 0 0 0 4px color-mix(in oklab, var(--red) 13%, transparent); }
+
+    .page { width: min(1180px, 100%); margin: 0 auto; padding: 44px 38px 70px; }
+    .hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 30px; margin-bottom: 28px; }
+    .eyebrow { margin: 0 0 8px; color: var(--lime); font-size: 11px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    h1, h2, h3, h4, p { margin-top: 0; }
+    h1 { max-width: 700px; margin-bottom: 10px; font-size: clamp(30px, 4vw, 50px); letter-spacing: -0.055em; line-height: 1.04; }
+    .hero-copy { max-width: 660px; margin-bottom: 0; color: var(--muted); font-size: 15px; }
+    .hero-meta { display: grid; min-width: 180px; gap: 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-soft); }
+    .hero-meta-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+    .hero-meta-row strong { color: var(--text); font-family: var(--mono); font-size: 12px; }
+
+    .section-nav { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 16px; padding-bottom: 2px; }
+    .section-tab { flex: 0 0 auto; padding: 8px 12px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12px; }
+    .section-tab:hover, .section-tab.active { border-color: var(--line); background: var(--panel); color: var(--text); }
+    .content-stack { display: grid; gap: 16px; }
+    .section-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(280px, .9fr); gap: 16px; }
+    .panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); }
+    .panel-inner { padding: 22px; }
+    .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 17px; }
+    .panel-title { margin-bottom: 5px; font-size: 16px; letter-spacing: -0.02em; }
+    .panel-subtitle { margin-bottom: 0; color: var(--muted); font-size: 13px; }
+    .panel-kicker { color: var(--faint); font-size: 11px; font-family: var(--mono); }
+    .accent-panel { position: relative; overflow: hidden; }
+    .accent-panel::before { position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: linear-gradient(90deg, var(--lime), var(--amber), transparent); content: ""; }
+    .selected-model { display: flex; align-items: center; gap: 14px; margin: 6px 0 20px; }
+    .model-orb { display: grid; width: 45px; height: 45px; place-items: center; border: 1px solid color-mix(in oklab, var(--lime) 50%, transparent); border-radius: 13px; background: var(--lime-soft); color: var(--lime); font-size: 18px; font-weight: 800; }
+    .selected-model strong { display: block; font-size: 20px; letter-spacing: -0.035em; }
+    .selected-model span { display: block; color: var(--muted); font-size: 12px; }
+    .field-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; font-weight: 650; }
+    .select-wrap { position: relative; }
+    select, input[type="search"] { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 9px; outline: none; background: var(--panel-soft); color: var(--text); }
+    select { appearance: none; padding: 0 40px 0 12px; }
+    .select-wrap::after { position: absolute; top: 50%; right: 14px; color: var(--muted); content: "⌄"; pointer-events: none; transform: translateY(-55%); }
+    select:focus, input[type="search"]:focus { border-color: var(--lime-deep); box-shadow: 0 0 0 3px color-mix(in oklab, var(--lime) 12%, transparent); }
+    input[type="search"] { padding: 0 12px; }
+    .hint { min-height: 18px; margin: 9px 0 0; color: var(--muted); font-size: 12px; }
+    .hint.success { color: var(--lime); }
+    .hint.error { color: var(--red); }
+    .mini-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 18px; }
+    .fact { padding: 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel-soft); }
+    .fact span { display: block; color: var(--faint); font-size: 10px; }
+    .fact strong { display: block; margin-top: 3px; color: var(--text); font-size: 12px; }
+    .health-list { display: grid; gap: 0; }
+    .health-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
+    .health-row:first-child { padding-top: 3px; }
+    .health-row:last-child { border-bottom: 0; padding-bottom: 3px; }
+    .health-row span { color: var(--muted); }
+    .health-row strong { max-width: 62%; overflow-wrap: anywhere; color: var(--text); font-family: var(--mono); font-size: 11px; font-weight: 500; text-align: right; }
+    .inline-state { display: inline-flex; align-items: center; gap: 6px; color: var(--lime) !important; font-family: var(--sans) !important; }
+
+    .endpoint-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .endpoint-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 13px 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel-soft); }
+    .endpoint-card span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; }
+    .endpoint-card code { display: block; overflow-wrap: anywhere; color: var(--text); font-size: 11px; }
+    .copy-btn, .ghost-btn { flex: 0 0 auto; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); font-size: 11px; }
+    .copy-btn { padding: 6px 8px; }
+    .copy-btn:hover, .ghost-btn:hover { border-color: var(--lime-deep); color: var(--lime); }
+    .ghost-btn { padding: 8px 11px; }
+    .section-note { margin: 14px 0 0; color: var(--muted); font-size: 12px; }
+    .section-note code { color: var(--amber); }
+
+    .models-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .models-toolbar input { flex: 1; }
+    .models-count { flex: 0 0 auto; color: var(--faint); font-family: var(--mono); font-size: 11px; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; min-width: 610px; }
+    th, td { padding: 11px 13px; border-bottom: 1px solid var(--line-soft); text-align: left; vertical-align: middle; }
+    th { color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    td { color: var(--muted); font-size: 12px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: color-mix(in oklab, var(--lime) 4%, transparent); }
+    .model-name { display: grid; gap: 2px; }
+    .model-name code { color: var(--text); font-size: 12px; }
+    .model-name span { color: var(--faint); font-size: 11px; }
+    .badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border-radius: 999px; background: var(--lime-soft); color: var(--lime); font-size: 10px; }
+    .badge.neutral { background: var(--panel-raised); color: var(--muted); }
+    .model-select-btn { padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); font-size: 11px; }
+    .model-select-btn:hover, .model-select-btn.current { border-color: var(--lime-deep); background: var(--lime-soft); color: var(--lime); }
+    .model-select-btn.current { cursor: default; }
+    .empty { padding: 24px; color: var(--muted); text-align: center; }
+
+    .example-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .example-card { min-width: 0; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--bg-deep); }
+    .example-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border-bottom: 1px solid var(--line-soft); }
+    .example-head strong { font-size: 12px; }
+    pre { overflow: auto; margin: 0; padding: 15px; color: var(--muted); font-size: 11px; line-height: 1.65; white-space: pre-wrap; }
+    pre .accent-code { color: var(--lime); }
+    .footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 22px 0 0; color: var(--faint); font-size: 11px; }
+    .footer code { color: var(--muted); }
+    .toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; padding: 10px 13px; border: 1px solid var(--lime-deep); border-radius: 9px; background: var(--panel-raised); box-shadow: var(--shadow); color: var(--lime); font-size: 12px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: opacity 180ms ease, transform 180ms ease; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .loading { color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 900px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .sidebar { position: static; height: auto; padding: 14px 16px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
+      .brand { padding: 0 3px 12px; }
+      .nav-label, .sidebar-spacer, .sidebar-note { display: none; }
+      .nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+      .nav-item { justify-content: center; padding: 8px 5px; font-size: 11px; }
+      .nav-glyph { width: auto; }
+      .topbar { padding: 0 20px; }
+      .page { padding: 32px 20px 55px; }
+    }
+    @media (max-width: 680px) {
+      .topbar { min-height: 58px; }
+      .top-actions .ghost-btn { display: none; }
+      .hero { display: grid; gap: 17px; }
+      .hero-meta { width: 100%; }
+      .section-grid, .endpoint-grid, .example-grid { grid-template-columns: 1fr; }
+      .mini-facts { grid-template-columns: 1fr; }
+      .panel-inner { padding: 17px; }
+      .page { padding-right: 14px; padding-left: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">WB</div>
+        <div class="brand-copy"><strong>WorkBuddy Proxy</strong><span>local ACP gateway</span></div>
+      </div>
+      <div class="nav-label">Workspace</div>
+      <nav class="nav">
+        <button class="nav-item" data-scroll="connection"><span class="nav-glyph">⌂</span><span>仪表盘</span></button>
+        <button class="nav-item active" data-scroll="connection"><span class="nav-glyph">◈</span><span>连接</span></button>
+        <button class="nav-item" data-scroll="models"><span class="nav-glyph">✦</span><span>模型</span></button>
+        <button class="nav-item" data-scroll="examples"><span class="nav-glyph">&lt;/&gt;</span><span>示例</span></button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-note">
+        <div class="eyebrow">Local only</div>
+        <p>代理绑定在回环地址。模型选择会保存到本机，下次启动继续使用。</p>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="crumbs"><span>WorkBuddy</span><span class="crumb-separator">/</span><strong>Integrations</strong></div>
+        <div class="top-actions">
+          <button class="ghost-btn" id="refresh-btn" type="button">↻ 刷新状态</button>
+          <div class="status-pill"><span class="status-dot" id="status-dot"></span><span id="status-text">连接中…</span></div>
+        </div>
+      </header>
+
+      <div class="page">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Integration / API access</p>
+            <h1>把 WorkBuddy 模型接到你的客户端。</h1>
+            <p class="hero-copy">选择真实的 WorkBuddy 模型，查看 OpenAI 兼容 API 地址，并复制可直接运行的请求示例。这个页面只管理本机代理，不生成或展示上游密钥。</p>
+          </div>
+          <div class="hero-meta" aria-label="当前代理信息">
+            <div class="hero-meta-row"><span>默认模型</span><strong id="hero-model">—</strong></div>
+            <div class="hero-meta-row"><span>可调用模型</span><strong id="hero-count">—</strong></div>
+            <div class="hero-meta-row"><span>协议</span><strong>ACP → OpenAI</strong></div>
+          </div>
+        </section>
+
+        <div class="section-nav" role="tablist" aria-label="集成页面分区">
+          <button class="section-tab active" data-scroll="connection" role="tab">连接</button>
+          <button class="section-tab" data-scroll="endpoints" role="tab">端点</button>
+          <button class="section-tab" data-scroll="models" role="tab">模型</button>
+          <button class="section-tab" data-scroll="examples" role="tab">示例</button>
+        </div>
+
+        <div class="content-stack">
+          <section class="section-grid" id="connection">
+            <article class="panel accent-panel">
+              <div class="panel-inner">
+                <div class="panel-head">
+                  <div><h2 class="panel-title">默认模型</h2><p class="panel-subtitle">没有在请求中指定模型时，代理会使用这里的选择。</p></div>
+                  <span class="panel-kicker">WORKBUDDY_MODEL</span>
+                </div>
+                <div class="selected-model">
+                  <div class="model-orb" aria-hidden="true">✦</div>
+                  <div><strong id="selected-name">加载中…</strong><span id="selected-id">读取 WorkBuddy 运行时目录</span></div>
+                </div>
+                <label class="field-label" for="model-select">选择要代理的模型</label>
+                <div class="select-wrap"><select id="model-select" aria-label="选择要代理的 WorkBuddy 模型" disabled><option>加载中…</option></select></div>
+                <p class="hint" id="model-hint" aria-live="polite">切换后会回收旧 sidecar，下一次请求使用新模型。</p>
+                <div class="mini-facts">
+                  <div class="fact"><span>模型 ID</span><strong class="mono" id="fact-id">—</strong></div>
+                  <div class="fact"><span>工具调用</span><strong id="fact-tools">—</strong></div>
+                  <div class="fact"><span>推理能力</span><strong id="fact-reasoning">—</strong></div>
+                </div>
+              </div>
+            </article>
+
+            <article class="panel">
+              <div class="panel-inner">
+                <div class="panel-head"><div><h2 class="panel-title">代理状态</h2><p class="panel-subtitle">当前本地服务与 WorkBuddy ACP 连接。</p></div><span class="panel-kicker" id="health-time">—</span></div>
+                <div class="health-list">
+                  <div class="health-row"><span>服务</span><strong class="inline-state"><span class="status-dot"></span><span id="health-service">检查中…</span></strong></div>
+                  <div class="health-row"><span>传输</span><strong id="health-transport">—</strong></div>
+                  <div class="health-row"><span>上游</span><strong id="health-upstream">—</strong></div>
+                  <div class="health-row"><span>API Key</span><strong>本地占位符可用</strong></div>
+                  <div class="health-row"><span>绑定</span><strong>127.0.0.1</strong></div>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="panel" id="endpoints">
+            <div class="panel-inner">
+              <div class="panel-head"><div><h2 class="panel-title">网关端点</h2><p class="panel-subtitle">客户端填写基础 URL；需要指定协议时使用对应端点。</p></div><span class="panel-kicker">OPENAI COMPATIBLE</span></div>
+              <div class="endpoint-grid" id="endpoint-grid"><div class="loading">正在读取端点…</div></div>
+              <p class="section-note">建议客户端使用 <code>基础 URL</code>，模型字段填写当前选择的精确 ID。Responses 与 Chat Completions 都会经过 WorkBuddy ACP。</p>
+            </div>
+          </section>
+
+          <section class="panel" id="models">
+            <div class="panel-inner">
+              <div class="panel-head"><div><h2 class="panel-title">WorkBuddy 模型目录</h2><p class="panel-subtitle">优先读取 WorkBuddy 当前运行时模型选择器，并安全合并本机自定义模型；不会展示上游密钥或 URL。</p></div><span class="panel-kicker" id="models-count">—</span></div>
+              <div class="models-toolbar"><input id="model-search" type="search" placeholder="搜索模型 ID 或显示名称…" aria-label="搜索模型"><span class="models-count" id="models-filter-count">—</span></div>
+              <div class="table-wrap"><table><thead><tr><th>模型</th><th>能力</th><th>上下文</th><th>操作</th></tr></thead><tbody id="models-body"><tr><td colspan="4" class="empty">正在读取模型目录…</td></tr></tbody></table></div>
+            </div>
+          </section>
+
+          <section class="panel" id="examples">
+            <div class="panel-inner">
+              <div class="panel-head"><div><h2 class="panel-title">用法示例</h2><p class="panel-subtitle">示例会随当前选择的模型和端点自动更新。</p></div><span class="panel-kicker">COPY / RUN</span></div>
+              <div class="example-grid">
+                <article class="example-card"><div class="example-head"><strong>Chat Completions</strong><button class="copy-btn" type="button" data-copy-example="chat">复制</button></div><pre id="example-chat">加载中…</pre></article>
+                <article class="example-card"><div class="example-head"><strong>Responses API</strong><button class="copy-btn" type="button" data-copy-example="responses">复制</button></div><pre id="example-responses">加载中…</pre></article>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="footer"><span>WorkBuddy Proxy · local ACP gateway</span><span>Base URL: <code id="footer-base-url">—</code></span></footer>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const state = { config: null, health: null, models: [], selected: "", query: "" };
+    const $ = (selector) => document.querySelector(selector);
+    const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[char]));
+    const selectedModel = () => state.models.find((model) => model.id === state.selected) || state.models[0] || {};
+
+    function toast(message) {
+      const target = $("#toast");
+      target.textContent = message;
+      target.classList.add("show");
+      window.clearTimeout(toast.timer);
+      toast.timer = window.setTimeout(() => target.classList.remove("show"), 1800);
+    }
+
+    async function copyText(value) {
+      try {
+        await navigator.clipboard.writeText(value);
+        toast("已复制到剪贴板");
+      } catch (error) {
+        toast("复制失败，请手动选择文本");
+      }
+    }
+
+    function formatTokens(value) {
+      if (!value) return "—";
+      return Number(value).toLocaleString("en-US");
+    }
+
+    function renderModelSelect() {
+      const select = $("#model-select");
+      select.innerHTML = state.models.map((model) => `<option value="${escapeHtml(model.id)}"${model.id === state.selected ? " selected" : ""}>${escapeHtml(model.display_name || model.id)} · ${escapeHtml(model.id)}</option>`).join("");
+      select.disabled = state.models.length === 0;
+    }
+
+    function renderSelected() {
+      const model = selectedModel();
+      const id = model.id || "—";
+      const name = model.display_name || id;
+      const sourceLabel = { runtime: "WorkBuddy 运行时模型", custom: "WorkBuddy 自定义模型", installed: "WorkBuddy 安装目录", fallback: "当前代理模型" }[model.source] || "WorkBuddy model";
+      $("#selected-name").textContent = name;
+      $("#selected-id").textContent = id === name ? sourceLabel : `${sourceLabel} · ${id}`;
+      $("#fact-id").textContent = id;
+      $("#fact-tools").textContent = model.supports_tools ? "支持" : "未标注";
+      $("#fact-reasoning").textContent = model.supports_reasoning ? "支持" : "未标注";
+      $("#hero-model").textContent = id;
+      $("#hero-count").textContent = `${state.models.length} 个`;
+      renderModelSelect();
+      renderExamples();
+    }
+
+    function renderHealth() {
+      const health = state.health || {};
+      const ok = health.status === "ok";
+      $("#status-dot").classList.toggle("offline", !ok);
+      $("#status-text").textContent = ok ? "代理运行中" : "代理不可用";
+      $("#health-service").textContent = ok ? "open-workbuddy" : "不可用";
+      $("#health-transport").textContent = health.transport || "—";
+      $("#health-upstream").textContent = health.upstream || "—";
+      $("#health-time").textContent = new Date().toLocaleTimeString();
+    }
+
+    function renderEndpoints() {
+      const endpoints = state.config?.endpoints || {};
+      const rows = [
+        ["基础 URL", state.config?.base_url],
+        ["Responses API", endpoints.responses],
+        ["Chat Completions API", endpoints.chat_completions],
+        ["Models API", endpoints.models],
+      ];
+      $("#endpoint-grid").innerHTML = rows.map(([label, value]) => `<div class="endpoint-card"><div><span>${escapeHtml(label)}</span><code>${escapeHtml(value || "—")}</code></div><button class="copy-btn" type="button" data-copy="${escapeHtml(value || "")}">复制</button></div>`).join("");
+      $("#footer-base-url").textContent = state.config?.base_url || "—";
+    }
+
+    function renderModels() {
+      const query = state.query.trim().toLowerCase();
+      const filtered = state.models.filter((model) => `${model.id} ${model.display_name || ""}`.toLowerCase().includes(query));
+      $("#models-count").textContent = `${state.models.length} AVAILABLE`;
+      $("#models-filter-count").textContent = `${filtered.length} / ${state.models.length}`;
+      $("#models-body").innerHTML = filtered.length ? filtered.map((model) => {
+        const isCurrent = model.id === state.selected;
+        const abilities = [model.supports_tools ? "工具" : "基础", model.supports_reasoning ? "推理" : "—"];
+        return `<tr><td><div class="model-name"><code>${escapeHtml(model.id)}</code><span>${escapeHtml(model.display_name || model.id)}</span></div></td><td><span class="badge">${escapeHtml(abilities[0])}</span> <span class="badge neutral">${escapeHtml(abilities[1])}</span></td><td>${escapeHtml(formatTokens(model.max_input_tokens))}</td><td><button class="model-select-btn${isCurrent ? " current" : ""}" type="button" data-select-model="${escapeHtml(model.id)}"${isCurrent ? " disabled" : ""}>${isCurrent ? "当前默认" : "设为默认"}</button></td></tr>`;
+      }).join("") : `<tr><td colspan="4" class="empty">没有匹配的模型。</td></tr>`;
+    }
+
+    function renderExamples() {
+      const base = state.config?.base_url || `${window.location.origin}/v1`;
+      const model = selectedModel().id || state.selected || "hy3";
+      const chat = `curl ${base}/chat/completions \\
+  -H "Authorization: Bearer local-proxy" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model}",
+    "messages": [{"role": "user", "content": "你好，WorkBuddy！"}]
+  }'`;
+      const responses = `curl ${base}/responses \\
+  -H "Authorization: Bearer local-proxy" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${model}",
+    "input": "你好，WorkBuddy！"
+  }'`;
+      $("#example-chat").textContent = chat;
+      $("#example-responses").textContent = responses;
+    }
+
+    async function loadDashboard() {
+      try {
+        const [configResponse, healthResponse] = await Promise.all([fetch("/proxy/config"), fetch("/health")]);
+        if (!configResponse.ok) throw new Error("配置接口不可用");
+        state.config = await configResponse.json();
+        state.health = healthResponse.ok ? await healthResponse.json() : { status: "error" };
+        state.models = Array.isArray(state.config.models) ? state.config.models : [];
+        state.selected = state.config.model || state.models[0]?.id || "";
+        renderSelected();
+        renderHealth();
+        renderEndpoints();
+        renderModels();
+        $("#model-hint").className = "hint";
+        $("#model-hint").textContent = "切换后会回收旧 sidecar，下一次请求使用新模型。";
+      } catch (error) {
+        state.health = { status: "error" };
+        renderHealth();
+        $("#model-hint").className = "hint error";
+        $("#model-hint").textContent = `无法读取代理配置：${error.message}`;
+      }
+    }
+
+    async function chooseModel(modelId) {
+      const select = $("#model-select");
+      select.disabled = true;
+      $("#model-hint").className = "hint";
+      $("#model-hint").textContent = `正在切换到 ${modelId}…`;
+      try {
+        const response = await fetch("/proxy/model", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: modelId }) });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result?.error?.message || result?.detail || "模型切换失败");
+        state.selected = result.model;
+        $("#model-hint").className = "hint success";
+        $("#model-hint").textContent = result.sidecars_recycled ? "已切换并回收旧 sidecar；下一次请求将使用新模型。" : "当前默认模型没有变化。";
+        renderSelected();
+        renderModels();
+        toast(`默认模型已切换为 ${result.model}`);
+      } catch (error) {
+        $("#model-hint").className = "hint error";
+        $("#model-hint").textContent = error.message;
+      } finally {
+        select.disabled = false;
+      }
+    }
+
+    document.addEventListener("click", (event) => {
+      const target = event.target.closest("[data-copy], [data-copy-example], [data-select-model], [data-scroll]");
+      if (!target) return;
+      if (target.dataset.scroll) {
+        document.getElementById(target.dataset.scroll)?.scrollIntoView({ behavior: "smooth", block: "start" });
+        document.querySelectorAll("[data-scroll]").forEach((item) => item.classList.toggle("active", item.dataset.scroll === target.dataset.scroll));
+      }
+      if (target.dataset.copy) copyText(target.dataset.copy);
+      if (target.dataset.copyExample) copyText($(target.dataset.copyExample === "chat" ? "#example-chat" : "#example-responses").textContent);
+      if (target.dataset.selectModel) chooseModel(target.dataset.selectModel);
+    });
+    $("#model-select").addEventListener("change", (event) => chooseModel(event.target.value));
+    $("#model-search").addEventListener("input", (event) => { state.query = event.target.value; renderModels(); });
+    $("#refresh-btn").addEventListener("click", () => { toast("正在刷新"); loadDashboard(); });
+    window.addEventListener("hashchange", () => {
+      if (location.hash.includes("models")) document.getElementById("models")?.scrollIntoView();
+      else if (location.hash.includes("examples")) document.getElementById("examples")?.scrollIntoView();
+      else document.getElementById("connection")?.scrollIntoView();
+    });
+    loadDashboard();
+  </script>
+</body>
+</html>

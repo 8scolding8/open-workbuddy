@@ -227,4 +227,3 @@ WorkBuddy and CodeBuddy are trademarks or product names of their respective owne
 ## License
 
 Released under the [MIT License](LICENSE).
-
