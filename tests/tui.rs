@@ -42,7 +42,7 @@ fn launcher_force_rebuild_delegates_to_cargo() {
     let log = temp.path().join("cargo.log");
     std::fs::write(
         &cargo,
-        "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$CARGO_LOG\"\n",
+        "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$CARGO_LOG\"\nsleep 5\n",
     )
     .unwrap();
     std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o700)).unwrap();
