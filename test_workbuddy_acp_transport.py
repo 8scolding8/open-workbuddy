@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 
@@ -79,7 +79,13 @@ class WorkBuddyAcpTransportTests(unittest.TestCase):
                 json.dumps({"pid": os.getpid(), "url": "http://127.0.0.1:22222"}),
                 encoding="utf-8",
             )
-            with patch.dict(os.environ, {"WORKBUDDY_ACP_PASSWORD": "local-secret"}):
+            # Avoid patching the whole process environment. On Windows,
+            # clearing and restoring os.environ can block in the runner.
+            with patch.object(
+                WorkBuddyAcpTransport,
+                "_environment_password",
+                return_value="local-secret",
+            ):
                 self.assertEqual(
                     WorkBuddyAcpTransport.discover(Path(temp_dir)),
                     ("http://127.0.0.1:22222", "local-secret"),
@@ -122,6 +128,24 @@ class WorkBuddyAcpTransportTests(unittest.TestCase):
                 WorkBuddyAcpTransport.discover_all(Path(temp_dir)),
                 ["http://127.0.0.1:22222"],
             )
+
+    def test_windows_liveness_probe_uses_bounded_handle_wait(self):
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = 123
+        kernel32.WaitForSingleObject.return_value = 0x102
+        windll = MagicMock(kernel32=kernel32)
+        with (
+            patch.object(upstream_transport.os, "name", "nt"),
+            patch("ctypes.windll", windll, create=True),
+        ):
+            self.assertTrue(WorkBuddyAcpTransport._process_is_alive(321))
+        kernel32.OpenProcess.assert_called_once()
+        kernel32.WaitForSingleObject.assert_called_once_with(123, 0)
+        kernel32.CloseHandle.assert_called_once_with(123)
+
+    def test_windows_liveness_probe_rejects_out_of_range_pid(self):
+        with patch.object(upstream_transport.os, "name", "nt"):
+            self.assertFalse(WorkBuddyAcpTransport._process_is_alive(10**100))
 
     def test_sse_parser_rejects_malformed_json(self):
         class Response:

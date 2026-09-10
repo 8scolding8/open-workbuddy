@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 from dataclasses import dataclass
 import json
 import logging
@@ -144,16 +145,43 @@ class WorkBuddyAcpTransport:
 
     @staticmethod
     def _process_is_alive(pid) -> bool:
-        if os.name == "nt":
-            try:
-                os.kill(int(pid), 0)
-                return True
-            except (OSError, TypeError, ValueError):
-                return False
         try:
-            return int(pid) > 0 and Path(f"/proc/{int(pid)}").exists()
+            pid = int(pid)
         except (TypeError, ValueError):
             return False
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            if pid > 0xFFFFFFFF:
+                return False
+            try:
+                # os.kill(pid, 0) is not a non-invasive liveness probe on
+                # Windows and can block for an invalid PID. Query the handle
+                # directly and use a zero-timeout wait instead.
+                process_query_limited_information = 0x1000
+                synchronize = 0x00100000
+                wait_timeout = 0x102
+                handle = ctypes.windll.kernel32.OpenProcess(
+                    process_query_limited_information | synchronize,
+                    False,
+                    pid,
+                )
+                if not handle:
+                    return False
+                try:
+                    return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                OverflowError,
+                AttributeError,
+                ctypes.ArgumentError,
+            ):
+                return False
+        return Path(f"/proc/{pid}").exists()
 
     @staticmethod
     def discover_all(config_dir: Path | None = None) -> list[str]:
