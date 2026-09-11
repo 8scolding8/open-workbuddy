@@ -45,10 +45,25 @@ function firstStringByKey(obj, keys) {
   return found;
 }
 
-function countLikelyItems(obj) {
-  let best = 0;
-  walk(obj, node => { if (Array.isArray(node)) best = Math.max(best, node.length); });
-  return best;
+function collectNamedObjects(obj, idKeys, nameKeys) {
+  const out = [];
+  const seen = new Set();
+  walk(obj, node => {
+    if (!node || Array.isArray(node)) return;
+    let id = '';
+    let name = '';
+    for (const k of idKeys) if (typeof node[k] === 'string' && node[k]) { id = node[k]; break; }
+    for (const k of nameKeys) if (typeof node[k] === 'string' && node[k]) { name = node[k]; break; }
+    if (id && name && !seen.has(id)) {
+      seen.add(id);
+      out.push({ id, name });
+    }
+  });
+  return out;
+}
+
+function findNextCursor(obj) {
+  return firstStringByKey(obj, ['next_cursor','nextCursor','next_page_cursor','nextPageCursor']);
 }
 
 async function callTool(name, args, id) {
@@ -65,37 +80,65 @@ async function main() {
     await rpc('initialize', {
       protocolVersion: '2025-03-26',
       capabilities: {},
-      clientInfo: { name:'ima-smoke-test', version:'1.0.0' }
+      clientInfo: { name:'ima-smoke-test', version:'1.1.0' }
     }, 1);
     summary.initialize = true;
 
     const tools = await rpc('tools/list', {}, 2);
     summary.tools = Array.isArray(tools?.tools) && tools.tools.length >= 6;
 
-    const kbData = await callTool('search_knowledge_base', { query:'', cursor:'', limit:20 }, 3);
-    summary.knowledgeBases = true;
-    const kbCount = countLikelyItems(kbData);
-    const kbId = firstStringByKey(kbData, ['knowledge_base_id','knowledgeBaseId','kb_id','id']);
+    const allKbs = [];
+    const seenKb = new Set();
+    let cursor = '';
+    let rpcId = 3;
+    for (let page = 0; page < 20; page++) {
+      const kbData = await callTool('search_knowledge_base', { query:'', cursor, limit:20 }, rpcId++);
+      summary.knowledgeBases = true;
+      const found = collectNamedObjects(
+        kbData,
+        ['knowledge_base_id','knowledgeBaseId','kb_id','id'],
+        ['knowledge_base_name','knowledgeBaseName','name','title']
+      );
+      for (const kb of found) if (!seenKb.has(kb.id)) { seenKb.add(kb.id); allKbs.push(kb); }
+      const next = findNextCursor(kbData);
+      if (!next || next === cursor) break;
+      cursor = next;
+    }
 
+    console.log(`[IMA_KB_ENUM] ${JSON.stringify({ count: allKbs.length, knowledgeBases: allKbs })}`);
+
+    const firstKb = allKbs[0];
     let mediaId = null;
     let title = null;
-    if (kbId) {
-      const listData = await callTool('get_knowledge_list', { knowledge_base_id:kbId, cursor:'', limit:20 }, 4);
+    if (firstKb?.id) {
+      const listData = await callTool('get_knowledge_list', { knowledge_base_id:firstKb.id, cursor:'', limit:20 }, rpcId++);
       summary.browse = true;
+      const items = collectNamedObjects(
+        listData,
+        ['media_id','mediaId','doc_id','document_id','folder_id','folderId','id'],
+        ['title','name']
+      ).slice(0,5);
+      console.log(`[IMA_KB_SAMPLE] ${JSON.stringify({ knowledgeBase: firstKb, sampleItems: items })}`);
       mediaId = firstStringByKey(listData, ['media_id','mediaId','doc_id','document_id']);
       title = firstStringByKey(listData, ['title','name']);
 
       if (title) {
-        await callTool('search_knowledge', { query:title.slice(0,32), knowledge_base_id:kbId, cursor:'' }, 5);
+        const searchData = await callTool('search_knowledge', { query:title.slice(0,32), knowledge_base_id:firstKb.id, cursor:'' }, rpcId++);
         summary.search = true;
+        const hits = collectNamedObjects(
+          searchData,
+          ['media_id','mediaId','doc_id','document_id','id'],
+          ['title','name']
+        ).slice(0,5);
+        console.log(`[IMA_KB_SEARCH] ${JSON.stringify({ query:title.slice(0,32), hitCount:hits.length, hits })}`);
       }
       if (mediaId) {
-        await callTool('get_media_info', { media_id:mediaId }, 6);
+        await callTool('get_media_info', { media_id:mediaId }, rpcId++);
         summary.read = true;
       }
     }
 
-    console.log(`[IMA_SMOKE] PASS ${JSON.stringify({ ...summary, knowledgeBaseCandidates: kbCount })}`);
+    console.log(`[IMA_SMOKE] PASS ${JSON.stringify({ ...summary, knowledgeBaseCount: allKbs.length })}`);
   } catch (e) {
     console.error(`[IMA_SMOKE] FAIL ${JSON.stringify(summary)} :: ${e?.message || String(e)}`);
   }
