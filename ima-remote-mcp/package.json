@@ -1,0 +1,10 @@
+{
+  "name": "ima-remote-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only remote MCP bridge for Tencent IMA OpenAPI",
+  "scripts": {"start": "node server.mjs"},
+  "dependencies": {"@modelcontextprotocol/sdk": "1.29.0", "express": "^5.1.0"},
+  "engines": {"node": ">=20"}
+}
