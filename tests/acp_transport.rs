@@ -10,7 +10,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -141,7 +141,23 @@ fn discovery_accepts_live_registrations_deduplicates_and_skips_malformed() {
     );
 }
 
-async fn retry_gateway(refuse_attempts: usize) -> (SocketAddr, Arc<AtomicUsize>) {
+#[test]
+fn discovery_rejects_non_loopback_registrations() {
+    let dir = tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir(&sessions).unwrap();
+    let pid = std::process::id();
+    std::fs::write(
+        sessions.join("external.json"),
+        format!(r#"{{"pid":{pid},"url":"http://example.test:1234"}}"#),
+    )
+    .unwrap();
+    assert!(discover_all(Some(dir.path())).is_empty());
+}
+
+async fn retry_gateway(
+    refuse_attempts: usize,
+) -> (SocketAddr, Arc<AtomicUsize>, Arc<Mutex<Option<String>>>) {
     use axum::{
         Json, Router,
         extract::State,
@@ -155,6 +171,7 @@ async fn retry_gateway(refuse_attempts: usize) -> (SocketAddr, Arc<AtomicUsize>)
     struct GatewayState {
         prompts: Arc<AtomicUsize>,
         refuse_attempts: usize,
+        selected_model: Arc<Mutex<Option<String>>>,
     }
 
     async fn connect() -> impl IntoResponse {
@@ -176,13 +193,22 @@ async fn retry_gateway(refuse_attempts: usize) -> (SocketAddr, Arc<AtomicUsize>)
             "session/new" => {
                 vec![json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":"session-1"}})]
             }
+            "session/set_model" => {
+                *state.selected_model.lock().unwrap() =
+                    body["params"]["modelId"].as_str().map(str::to_string);
+                vec![json!({"jsonrpc":"2.0","id":id,"result":{}})]
+            }
             "session/prompt" => {
                 let attempt = state.prompts.fetch_add(1, Ordering::SeqCst) + 1;
+                let message_id = body["params"]["_meta"]["codebuddy.ai/messageId"]
+                    .as_str()
+                    .unwrap();
                 if attempt <= state.refuse_attempts {
                     vec![json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"refusal"}})]
                 } else {
                     vec![
-                        json!({"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"RETRY_OK"}}}}),
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"other-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"STALE"}}}}),
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","messageId":message_id,"_meta":{"codebuddy.ai/messageId":message_id},"content":{"type":"text","text":"RETRY_OK"}}}}),
                         json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
                     ]
                 }
@@ -207,9 +233,11 @@ async fn retry_gateway(refuse_attempts: usize) -> (SocketAddr, Arc<AtomicUsize>)
     }
 
     let prompts = Arc::new(AtomicUsize::new(0));
+    let selected_model = Arc::new(Mutex::new(None));
     let state = GatewayState {
         prompts: prompts.clone(),
         refuse_attempts,
+        selected_model: selected_model.clone(),
     };
     let app = Router::new()
         .route("/api/v1/acp", get(connect).post(rpc).delete(close))
@@ -217,7 +245,7 @@ async fn retry_gateway(refuse_attempts: usize) -> (SocketAddr, Arc<AtomicUsize>)
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (address, prompts)
+    (address, prompts, selected_model)
 }
 
 fn retry_transport(address: SocketAddr) -> AcpTransport {
@@ -226,12 +254,13 @@ fn retry_transport(address: SocketAddr) -> AcpTransport {
         password: String::new(),
         cwd: PathBuf::from("/tmp"),
         timeout: Duration::from_secs(5),
+        model: Some("hy3".into()),
     }
 }
 
 #[tokio::test]
 async fn retries_retryable_failure_before_first_delta() {
-    let (address, prompts) = retry_gateway(1).await;
+    let (address, prompts, selected_model) = retry_gateway(1).await;
     let mut stream = retry_transport(address)
         .stream_chat_with_attempts(vec![json!({"role":"user","content":"hello"})], 2);
     assert_eq!(
@@ -244,11 +273,12 @@ async fn retries_retryable_failure_before_first_delta() {
     );
     assert!(stream.next().await.is_none());
     assert_eq!(prompts.load(Ordering::SeqCst), 2);
+    assert_eq!(selected_model.lock().unwrap().as_deref(), Some("hy3"));
 }
 
 #[tokio::test]
 async fn reports_exhausted_pre_content_retries() {
-    let (address, prompts) = retry_gateway(3).await;
+    let (address, prompts, selected_model) = retry_gateway(3).await;
     let mut stream = retry_transport(address)
         .stream_chat_with_attempts(vec![json!({"role":"user","content":"hello"})], 2);
     let error = stream.next().await.unwrap().unwrap_err();
@@ -257,6 +287,7 @@ async fn reports_exhausted_pre_content_retries() {
     assert!(error.message.contains("failed after 2 attempts"));
     assert_eq!(prompts.load(Ordering::SeqCst), 2);
     assert!(stream.next().await.is_none());
+    assert_eq!(selected_model.lock().unwrap().as_deref(), Some("hy3"));
 }
 
 #[test]

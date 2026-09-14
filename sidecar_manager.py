@@ -21,6 +21,50 @@ class SidecarError(RuntimeError):
     pass
 
 
+SIDECAR_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "HOME",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "COMMONPROGRAMFILES",
+        "COMMONPROGRAMFILES(X86)",
+        "WORKBUDDY_APP_NAME",
+        "WORKBUDDY_APP_PATH",
+        "WORKBUDDY_APP_VERSION",
+        "WORKBUDDY_CONFIG_DIR",
+        "WORKBUDDY_DATA_FOLDER_NAME",
+        "WORKBUDDY_EXTRA_PATHS",
+        "WORKBUDDY_IS_PACKAGED",
+        "WORKBUDDY_LOCALE",
+        "WORKBUDDY_NODE_ENV",
+        "WORKBUDDY_PRODUCT_NAME",
+        "WORKBUDDY_PROMPT_TEMPLATES_DIR",
+        "WORKBUDDY_RESOURCES_PATH",
+        "WORKBUDDY_USER_DATA_DIR",
+        "CODEBUDDY_BUILTIN_SKILLS_DIR",
+        "CODEBUDDY_CONFIG_DIR",
+        "CODEBUDDY_HOST",
+        "CODEBUDDY_INTERNET_ENVIRONMENT",
+        "CODEBUDDY_NODE_BIN",
+        "SSH_AUTH_SOCK",
+    }
+)
+
+
 def free_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -113,6 +157,15 @@ class SidecarManager:
             return [node, str(self.cli_path), *arguments]
         return [str(self.cli_path), *arguments]
 
+    @staticmethod
+    def _sidecar_environment() -> dict[str, str]:
+        """Keep credentials and dynamic loader injection out of sidecars."""
+        return {
+            name: value
+            for name, value in os.environ.items()
+            if name.upper() in SIDECAR_ENV_ALLOWLIST
+        }
+
     async def ensure(self, session: dict) -> str:
         session_id = session["id"]
         marker = f"proxy_{session_id}"
@@ -141,7 +194,7 @@ class SidecarManager:
             log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             os.chmod(log_path, 0o600)
             log_handle = os.fdopen(log_fd, "ab", buffering=0)
-            environment = os.environ.copy()
+            environment = self._sidecar_environment()
             environment.update(
                 {
                     "WORKBUDDY_PROXY_SIDECAR": "1",

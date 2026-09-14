@@ -39,5 +39,18 @@ class ProxyAuthTests(unittest.TestCase):
             self.assertEqual(proxy_server.get_auth_token(request), "Bearer upstream-secret")
 
 
+class DashboardConfigTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_config_reports_only_whether_local_key_is_configured(self):
+        transport = httpx.ASGITransport(app=proxy_server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            with patch.object(proxy_server.config, "PROXY_API_KEY", "local-secret"):
+                response = await client.get("/proxy/config")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["proxy_api_key_configured"])
+        self.assertNotIn("local-secret", response.text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,9 +22,28 @@ function Write-LauncherLog {
 function Test-ProxyReady {
     try {
         $health = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 2
-        return $health.status -eq 'ok'
+        return $health.status -eq 'ok' -and $health.service -eq 'open-workbuddy'
     } catch {
         return $false
+    }
+}
+
+function Test-PortInUse {
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $async = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+        $connected = $async.AsyncWaitHandle.WaitOne(750)
+        if ($connected -and $client.Connected) {
+            $client.EndConnect($async)
+            return $true
+        }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        if ($client) {
+            $client.Dispose()
+        }
     }
 }
 
@@ -36,6 +55,9 @@ try {
     if (Test-ProxyReady) {
         Write-LauncherLog "Proxy already running on port $Port. Reusing it."
     } else {
+        if (Test-PortInUse) {
+            throw "Port $Port is already occupied by a different service. Stop only the verified stale proxy process or rerun with -Port <free-port>."
+        }
         $pwsh = Join-Path $PSHOME 'pwsh.exe'
         if (-not (Test-Path -LiteralPath $pwsh -PathType Leaf)) {
             $pwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
@@ -63,12 +85,17 @@ try {
         if (Test-ProxyReady) {
             Write-LauncherLog "Proxy health check passed."
         } else {
-            Write-LauncherLog "Proxy did not report healthy within 45 seconds; opening dashboard anyway."
+            throw "Proxy did not report healthy within 45 seconds. Check $serverErrorLog and $serverLog."
         }
     }
 
-    Start-Process $dashboardUrl | Out-Null
-    Write-LauncherLog "Opened $dashboardUrl."
+    try {
+        Start-Process $dashboardUrl | Out-Null
+        Write-LauncherLog "Opened $dashboardUrl."
+    } catch {
+        Write-LauncherLog "Proxy is healthy, but the dashboard could not be opened automatically: $($_.Exception.Message)"
+        Write-Warning "Proxy is running at $dashboardUrl, but the dashboard could not be opened automatically."
+    }
 } catch {
     Write-LauncherLog "Launcher failed: $($_.Exception.Message)"
     throw

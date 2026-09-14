@@ -31,6 +31,27 @@ fn configured_public_url_defaults_to_http_and_loopback() {
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.max_sidecars, 16);
 }
+
+#[test]
+fn non_loopback_bind_requires_local_proxy_key() {
+    let dir = tempdir().unwrap();
+    let env = HashMap::from([
+        ("HOME".into(), dir.path().to_string_lossy().to_string()),
+        ("PROXY_HOST".into(), "0.0.0.0".into()),
+    ]);
+    let error = Config::load_with_env(dir.path(), &env).unwrap_err();
+    assert!(error.to_string().contains("PROXY_API_KEY is required"));
+
+    let env = HashMap::from([
+        ("HOME".into(), dir.path().to_string_lossy().to_string()),
+        ("PROXY_HOST".into(), "0.0.0.0".into()),
+        ("PROXY_API_KEY".into(), "local-secret".into()),
+    ]);
+    assert_eq!(
+        Config::load_with_env(dir.path(), &env).unwrap().host,
+        "0.0.0.0"
+    );
+}
 #[test]
 fn default_project_is_canonical_and_must_be_a_directory() {
     let root = tempdir().unwrap();

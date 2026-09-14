@@ -13,10 +13,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich.table import Table
-from rich.text import Text
-from rich.markdown import Markdown
-from rich.layout import Layout
-from rich.align import Align
 
 import config
 
@@ -44,7 +40,7 @@ def start_proxy_background():
     console.print(f"[bold cyan]Starting Open WorkBuddy Proxy Server in background on {PROXY_URL}...[/bold cyan]")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     log_file = open(os.path.join(script_dir, "proxy_server.log"), "a")
-    proc = subprocess.Popen(
+    subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "proxy_server:app", "--host", config.DEFAULT_HOST, "--port", str(config.DEFAULT_PORT)],
         cwd=script_dir,
         stdout=log_file,

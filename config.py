@@ -2,6 +2,7 @@
 
 import os
 import json
+import ipaddress
 import shutil
 from pathlib import Path
 from urllib.parse import urlparse
@@ -112,7 +113,7 @@ if is_protected_workbuddy_url(DEFAULT_BASE_URL) and TRANSPORT != "workbuddy_acp"
 
 WORKBUDDY_ACP_URL = str(
     os.environ.get("WORKBUDDY_ACP_URL")
-    or load_saved_value("WORKBUDDY_ACP_URL", "http://127.0.0.1:44741")
+    or load_saved_value("WORKBUDDY_ACP_URL", "")
 ).rstrip("/")
 WORKBUDDY_ACP_PASSWORD = str(
     os.environ.get("WORKBUDDY_ACP_PASSWORD")
@@ -156,10 +157,15 @@ def _model_entry(
     model_id = str(raw.get("id") or fallback_id or "").strip()
     if not model_id:
         return None
+    raw_created = raw.get("created")
+    try:
+        created_value = int(raw_created or created or 0)
+    except (TypeError, ValueError, OverflowError):
+        created_value = int(created or 0)
     return {
         "id": model_id,
         "object": "model",
-        "created": int(raw.get("created") or created or 0),
+        "created": created_value,
         "owned_by": "workbuddy",
         "display_name": str(raw.get("name") or raw.get("display_name") or model_id),
         "supports_tools": raw.get("supportsToolCall") is True,
@@ -248,11 +254,29 @@ def load_runtime_workbuddy_models() -> list[dict]:
                                 active_ids.append(model_id)
                                 active_seen.add(model_id.lower())
 
-                ordered_ids = active_ids or [
+                catalog_ids = [
                     str(raw.get("id") or "").strip()
                     for raw in raw_models
                     if isinstance(raw, dict) and str(raw.get("id") or "").strip()
                 ]
+                tool_capable_ids = [
+                    str(raw.get("id") or "").strip()
+                    for raw in raw_models
+                    if isinstance(raw, dict)
+                    and raw.get("supportsToolCall") is True
+                    and str(raw.get("id") or "").strip()
+                ]
+                if active_ids:
+                    ordered_ids = active_ids + [
+                        model_id
+                        for model_id in tool_capable_ids
+                        if model_id.lower() not in active_seen
+                    ]
+                else:
+                    # Older WorkBuddy builds did not persist agents[].models.
+                    # Keep their complete catalog when capability metadata is
+                    # unavailable, otherwise avoid advertising completion/image-only IDs.
+                    ordered_ids = tool_capable_ids or catalog_ids
                 models: list[dict] = []
                 created = int(runtime_config.stat().st_mtime)
                 for model_id in ordered_ids:
@@ -371,11 +395,10 @@ def load_workbuddy_product_models() -> list[dict]:
 
 
 def load_workbuddy_models() -> list[dict]:
-    """Prefer WorkBuddy's live picker, then custom models, then static fallback."""
-    runtime_models = load_runtime_workbuddy_models()
-    models = runtime_models or load_workbuddy_product_models()
+    """Merge the live picker, installed catalog, and safe custom model metadata."""
+    models = load_runtime_workbuddy_models()
     seen = {str(item.get("id") or "").lower() for item in models}
-    for item in load_workbuddy_custom_models():
+    for item in [*load_workbuddy_product_models(), *load_workbuddy_custom_models()]:
         model_id = str(item.get("id") or "")
         if model_id.lower() not in seen:
             models.append(item)
@@ -481,3 +504,9 @@ if not 1 <= DEFAULT_PORT <= 65535:
     raise ValueError("PROXY_PORT must be between 1 and 65535")
 if not DEFAULT_HOST:
     raise ValueError("PROXY_HOST must not be empty")
+try:
+    _loopback_host = DEFAULT_HOST.lower() == "localhost" or ipaddress.ip_address(DEFAULT_HOST).is_loopback
+except ValueError:
+    _loopback_host = False
+if not _loopback_host and not PROXY_API_KEY:
+    raise ValueError("PROXY_API_KEY is required when PROXY_HOST is not loopback")

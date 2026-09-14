@@ -10,7 +10,7 @@ import httpx
 import proxy_server
 from session_store import SessionStore
 from sidecar_manager import SidecarManager
-from upstream_transport import WorkBuddyAcpError
+from upstream_transport import WorkBuddyAcpTransport
 
 
 class ProxySessionRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -28,6 +28,13 @@ class ProxySessionRoutingTests(unittest.IsolatedAsyncioTestCase):
             root / "runtime",
             idle_timeout=0,
         )
+        self.gateway_candidates = patch.object(
+            WorkBuddyAcpTransport,
+            "candidate_urls",
+            return_value=[],
+        )
+        self.gateway_candidates.start()
+        self.addCleanup(self.gateway_candidates.stop)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -213,6 +220,37 @@ class ProxySessionRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 409, response.text)
         self.assertIn("different project", response.text)
+        ensure.assert_not_awaited()
+
+    async def test_active_gateway_is_reused_before_starting_sidecar(self):
+        session = await self.store.create(str(self.project_one), "Existing gateway")
+        ensure = AsyncMock(return_value="http://127.0.0.1:45127")
+        self.manager.ensure = ensure
+        self.gateway_candidates.stop()
+        with (
+            patch.object(
+                WorkBuddyAcpTransport,
+                "candidate_urls",
+                return_value=["http://127.0.0.1:45128"],
+            ),
+            patch.object(proxy_server, "session_store", self.store),
+            patch.object(proxy_server, "sidecar_manager", self.manager),
+        ):
+            request = httpx.Request(
+                "POST",
+                "http://test/v1/chat/completions",
+                headers={
+                    "X-WorkBuddy-Session": session["id"],
+                    "X-WorkBuddy-Project": str(self.project_one),
+                },
+            )
+            resolved, gateway_url = await proxy_server.resolve_proxy_session(
+                request,
+                [{"role": "user", "content": "hello"}],
+            )
+
+        self.assertEqual(resolved["id"], session["id"])
+        self.assertEqual(gateway_url, "http://127.0.0.1:45128")
         ensure.assert_not_awaited()
 
 

@@ -4,27 +4,36 @@
 
 1. A compatible client sends `/v1/chat/completions` or `/v1/responses`.
 2. The proxy normalizes the request model and resolves a proxy-owned session.
-3. The sidecar manager starts or reuses an official CodeBuddy ACP gateway.
+3. The runtime reuses a live loopback WorkBuddy/CodeBuddy ACP gateway when one
+   is registered; otherwise the sidecar manager starts an official CodeBuddy
+   ACP gateway.
 4. The ACP transport creates an isolated session and sends the prompt.
-5. ACP updates are normalized into Chat Completions deltas or Responses SSE
+5. Each prompt carries a fresh ACP correlation/message ID; only matching
+   `agent_message_chunk` events are accepted, so replayed gateway history cannot
+   leak into the response.
+6. ACP updates are normalized into Chat Completions deltas or Responses SSE
    events.
-6. The proxy closes the ACP connection and keeps only the bounded local session
+7. The proxy closes the ACP connection and keeps only the bounded local session
    history.
 
 ## Runtime model catalog
 
-The Windows dashboard reads the current WorkBuddy runtime record under
-`~/.workbuddy/local_storage`. The active agent model list is used as the
-authoritative picker order, and metadata is sanitized before it is returned by
-`/v1/models`. Custom models are read separately from `~/.workbuddy/models.json`
-without exposing endpoint URLs or API keys.
+The Python dashboard/runtime and the Rust runtime read the current WorkBuddy
+runtime record under `~/.workbuddy/local_storage` when it is available. Active
+agent models are listed first, followed by other tool-capable entries from the
+same catalog; metadata is sanitized before it is returned by `/v1/models`.
 
-The installed `product.internal.json` catalog is only a fallback. This avoids
-showing an old package catalog when the WorkBuddy desktop client has already
-updated its model picker.
+The Windows Python path additionally merges safe custom models from
+`~/.workbuddy/models.json` and entries from the installed
+`product.internal.json` catalog without exposing endpoint URLs or API keys.
+The Rust path intentionally keeps its catalog parser small: it uses the runtime
+record or an explicitly configured `WORKBUDDY_RUNTIME_MODEL_CONFIG`, then falls
+back to its built-in list. The exact catalog remains dependent on the installed
+WorkBuddy version and account.
 
 ## Trust boundaries
 
-The proxy owns local sessions and sidecars. WorkBuddy owns account access,
-upstream quotas, model availability, and the official ACP gateway. The proxy
-does not attach to or modify the WorkBuddy GUI conversation store.
+The proxy owns local sessions and any sidecars it starts. WorkBuddy owns account
+access, upstream quotas, model availability, and the official ACP gateway. A
+reused gateway is addressed only through its loopback ACP endpoint; the proxy
+does not read its credentials or modify the WorkBuddy GUI conversation store.
