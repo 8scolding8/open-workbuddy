@@ -173,6 +173,7 @@ mod tests {
         );
         environment.insert("PROXY_HOST".into(), host.into());
         environment.insert("PROXY_PORT".into(), "40589".into());
+        environment.insert("PROXY_API_KEY".into(), "test-only-key".into());
         Config::load_with_env(Path::new("/tmp"), &environment).unwrap()
     }
 
