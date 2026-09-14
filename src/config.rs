@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     env, fs,
     io::Write,
+    net::IpAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
@@ -153,6 +154,12 @@ impl Config {
         if host.is_empty() {
             return Err(ProxyError::Invalid("PROXY_HOST must not be empty".into()));
         }
+        let proxy_api_key = text("PROXY_API_KEY", "").trim().to_string();
+        if !is_loopback_host(&host) && proxy_api_key.is_empty() {
+            return Err(ProxyError::Invalid(
+                "PROXY_API_KEY is required when PROXY_HOST is not loopback".into(),
+            ));
+        }
         let cors_origins = text("PROXY_CORS_ORIGINS", "http://127.0.0.1,http://localhost")
             .split(',')
             .map(str::trim)
@@ -180,7 +187,7 @@ impl Config {
             base_url,
             api_key,
             transport,
-            workbuddy_acp_url: text("WORKBUDDY_ACP_URL", "http://127.0.0.1:44741")
+            workbuddy_acp_url: text("WORKBUDDY_ACP_URL", "")
                 .trim_end_matches('/')
                 .to_string(),
             workbuddy_acp_password: text("WORKBUDDY_ACP_PASSWORD", ""),
@@ -215,9 +222,9 @@ impl Config {
             host,
             port: port_raw,
             cors_origins,
-            proxy_api_key: text("PROXY_API_KEY", ""),
+            proxy_api_key,
             max_sidecars,
-            models: available_models(),
+            models: available_models(environment, &home),
         })
     }
 
@@ -321,7 +328,49 @@ fn canonical_project_path(path: &Path) -> Result<PathBuf, ProxyError> {
     }
     Ok(canonical)
 }
-fn available_models() -> Vec<ModelInfo> {
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn available_models(environment: &HashMap<String, String>, home: &Path) -> Vec<ModelInfo> {
+    let mut candidates = Vec::new();
+    if let Some(configured) = environment
+        .get("WORKBUDDY_RUNTIME_MODEL_CONFIG")
+        .filter(|value| !value.trim().is_empty())
+    {
+        candidates.push(PathBuf::from(configured));
+    }
+    let runtime_dir = home.join(".workbuddy/local_storage");
+    if let Ok(entries) = fs::read_dir(runtime_dir) {
+        candidates.extend(entries.filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = path.file_name()?.to_str()?;
+            (name.starts_with("wb_entry_") && name.ends_with(".info") && path.is_file())
+                .then_some(path)
+        }));
+    }
+    candidates.sort_by_key(|path| {
+        std::cmp::Reverse(
+            fs::metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok(),
+        )
+    });
+
+    for path in candidates {
+        let Ok(bytes) = fs::read(path) else { continue };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if let Some(models) = runtime_models(&value)
+            && !models.is_empty()
+        {
+            return models;
+        }
+    }
+
     [
         "hy3",
         "deepseek-v4.1-flash",
@@ -334,13 +383,97 @@ fn available_models() -> Vec<ModelInfo> {
         "kimi-k3-1",
     ]
     .into_iter()
-    .map(|id| ModelInfo {
-        id: id.into(),
-        object: "model".into(),
-        created: 1_785_164_333,
-        owned_by: "workbuddy".into(),
-    })
+    .map(|id| model_info(id, 1_785_164_333))
     .collect()
+}
+
+fn runtime_models(value: &Value) -> Option<Vec<ModelInfo>> {
+    let records = value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_else(|| std::slice::from_ref(value));
+    for record in records {
+        let data = record
+            .get("data")
+            .filter(|value| value.is_object())
+            .unwrap_or(record);
+        let Some(raw_models) = data.get("models").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut by_id = HashMap::new();
+        let mut catalog_ids = Vec::new();
+        let mut tool_capable_ids = Vec::new();
+        for raw in raw_models {
+            let Some(id) = raw.get("id").and_then(Value::as_str).map(str::trim) else {
+                continue;
+            };
+            if id.is_empty() {
+                continue;
+            }
+            let key = id.to_lowercase();
+            by_id.entry(key).or_insert(raw);
+            catalog_ids.push(id.to_string());
+            if raw.get("supportsToolCall").and_then(Value::as_bool) == Some(true) {
+                tool_capable_ids.push(id.to_string());
+            }
+        }
+
+        let mut active_ids = Vec::new();
+        let mut active_seen = std::collections::HashSet::new();
+        if let Some(agents) = data.get("agents").and_then(Value::as_array) {
+            for agent in agents {
+                let Some(models) = agent.get("models").and_then(Value::as_array) else {
+                    continue;
+                };
+                for model in models {
+                    let Some(id) = model.as_str().map(str::trim) else {
+                        continue;
+                    };
+                    if !id.is_empty() && active_seen.insert(id.to_lowercase()) {
+                        active_ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+
+        let ordered_ids = if !active_ids.is_empty() {
+            let mut ordered = active_ids;
+            ordered.extend(
+                tool_capable_ids
+                    .into_iter()
+                    .filter(|id| !active_seen.contains(&id.to_lowercase())),
+            );
+            ordered
+        } else if !tool_capable_ids.is_empty() {
+            tool_capable_ids
+        } else {
+            catalog_ids
+        };
+        let models = ordered_ids
+            .into_iter()
+            .map(|id| {
+                let raw = by_id.get(&id.to_lowercase()).copied();
+                let created = raw
+                    .and_then(|value| value.get("created"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                model_info(&id, created)
+            })
+            .collect::<Vec<_>>();
+        if !models.is_empty() {
+            return Some(models);
+        }
+    }
+    None
+}
+
+fn model_info(id: &str, created: i64) -> ModelInfo {
+    ModelInfo {
+        id: id.to_string(),
+        object: "model".into(),
+        created,
+        owned_by: "workbuddy".into(),
+    }
 }
 
 #[cfg(test)]
@@ -350,5 +483,45 @@ mod tests {
     fn exact_protected_host() {
         assert!(is_protected_workbuddy_url("https://work.freemodel.dev/v1").unwrap());
         assert!(!is_protected_workbuddy_url("https://work.freemodel.dev.attacker/v1").unwrap());
+    }
+
+    #[test]
+    fn runtime_catalog_prefers_active_models_then_adds_tool_capable_models() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let home = root.path().join("home");
+        let runtime = home.join(".workbuddy/local_storage");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(
+            runtime.join("wb_entry_test.info"),
+            serde_json::json!({
+                "data": {
+                    "models": [
+                        {"id":"hy3","supportsToolCall":true},
+                        {"id":"deepseek-v4.1-flash","supportsToolCall":true},
+                        {"id":"hunyuan-image-alpha","supportsToolCall":false}
+                    ],
+                    "agents": [{"models":["deepseek-v4.1-flash"]}]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let environment = HashMap::from([
+            ("HOME".into(), home.to_string_lossy().to_string()),
+            (
+                "PROXY_DEFAULT_PROJECT".into(),
+                project.to_string_lossy().to_string(),
+            ),
+        ]);
+
+        let config = Config::load_with_env(&project, &environment).unwrap();
+        let ids = config
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["deepseek-v4.1-flash", "hy3"]);
     }
 }

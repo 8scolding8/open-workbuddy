@@ -1,4 +1,5 @@
 use crate::{
+    config::Config,
     error::{AcpError, ProxyError},
     models::SessionRecord,
     session_store::{SessionStore, canonical_project},
@@ -81,9 +82,13 @@ pub async fn resolve(
     messages: &[Value],
     store: &SessionStore,
     sidecars: &SidecarManager,
+    config: &Config,
     default_project: &str,
 ) -> Result<(SessionRecord, String), ProxyError> {
     let session = resolve_session(headers, messages, store, default_project).await?;
+    if let Some(url) = crate::acp::candidate_urls(config).into_iter().next() {
+        return Ok((session, url));
+    }
     let url = sidecars.ensure(&session).await.map_err(|e| {
         ProxyError::Acp(
             AcpError::new(e.to_string(), "configuration").status(StatusCode::SERVICE_UNAVAILABLE),

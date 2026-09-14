@@ -1,9 +1,7 @@
 """Comprehensive test suite for Open WorkBuddy Proxy."""
 
 import httpx
-import json
 import sys
-import os
 
 BASE_URL = "http://127.0.0.1:40589"
 TEST_API_KEY = "sk-dummy"

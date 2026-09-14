@@ -103,7 +103,7 @@ def run_exhaustive_tests():
             p = {"model": "hy3", "messages": [{"role": "user", "content": "Stream test"}], "stream": True}
             with client.stream("POST", f"{BASE_URL}/v1/chat/completions", json=p, headers=headers) as resp:
                 assert resp.status_code == 200
-                lines = [l for l in resp.iter_lines() if l]
+                lines = [line for line in resp.iter_lines() if line]
                 assert len(lines) > 0
                 print(f"[PASS 8/15] POST /v1/chat/completions (SSE streaming, {len(lines)} lines)")
                 passed += 1

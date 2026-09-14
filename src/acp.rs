@@ -7,6 +7,7 @@ use reqwest::{
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
+    net::IpAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -17,6 +18,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{OwnedMutexGuard, mpsc};
+use uuid::Uuid;
 
 const ACP_EVENT_CHANNEL_CAPACITY: usize = 64;
 
@@ -43,12 +45,14 @@ pub struct AcpTransport {
     pub password: String,
     pub cwd: PathBuf,
     pub timeout: Duration,
+    pub model: Option<String>,
 }
 impl AcpTransport {
     pub fn from_config(
         config: &Config,
         base_url: Option<&str>,
         cwd: Option<&Path>,
+        model: Option<&str>,
     ) -> Result<Self, AcpError> {
         let candidates = candidate_urls(config);
         let selected=base_url.map(str::to_string).or_else(||candidates.first().cloned()).ok_or_else(||AcpError::new("No active WorkBuddy ACP gateway was found. Start WorkBuddy or set WORKBUDDY_ACP_URL.","configuration"))?;
@@ -61,6 +65,10 @@ impl AcpTransport {
             },
             cwd: cwd.unwrap_or(&config.workbuddy_acp_cwd).into(),
             timeout: Duration::from_secs_f64(config.workbuddy_acp_timeout),
+            model: model
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
         })
     }
     fn headers(&self) -> Result<HeaderMap, AcpError> {
@@ -172,10 +180,100 @@ impl AcpTransport {
             self.rpc(&client,&connection,&token,1,"initialize",json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"open-workbuddy","title":"Open WorkBuddy Proxy","version":"2.0.0"}}),|_|Ok(())).await?;
             self.rpc(&client,&connection,&token,2,"session/new",json!({"cwd":self.cwd,"mcpServers":[]}),|e|{if e.get("id").and_then(Value::as_i64)==Some(2){session_id=e.pointer("/result/sessionId").and_then(Value::as_str).unwrap_or("").into();}Ok(())}).await?;
             if session_id.is_empty(){return Err(AcpError::new("WorkBuddy ACP did not create a session","protocol"));}
-            let prompt=serialize_messages(&messages);let mut complete=false;let mut disconnected=false;
-            self.rpc(&client,&connection,&token,3,"session/prompt",json!({"sessionId":session_id,"prompt":[{"type":"text","text":prompt}]}),|e|{if e.get("method").and_then(Value::as_str)==Some("session/update")&&e.pointer("/params/update/sessionUpdate").and_then(Value::as_str)==Some("agent_message_chunk"){if let Some(text)=e.pointer("/params/update/content/text").and_then(Value::as_str).filter(|s|!s.is_empty()){emitted.store(true,Ordering::Release);match tx.try_send(Ok(NormalizedEvent::TextDelta(text.into()))){Ok(())=>{},Err(mpsc::error::TrySendError::Closed(_))=>disconnected=true,Err(mpsc::error::TrySendError::Full(_))=>return Err(AcpError::new("WorkBuddy ACP downstream buffer is full","capacity")),}}}else if e.get("id").and_then(Value::as_i64)==Some(3){let reason=e.pointer("/result/stopReason").and_then(Value::as_str).unwrap_or("");if reason=="end_turn"{complete=true;}else{return Err(prompt_stop_error(e,reason));}}Ok(())}).await?;
+            if let Some(model) = self.model.as_deref() {
+                self.rpc(&client,&connection,&token,3,"session/set_model",json!({"sessionId":session_id,"modelId":model}),|_|Ok(())).await?;
+            }
+            let prompt = serialize_messages(&messages);
+            let message_id = format!("open-workbuddy-{}", Uuid::new_v4().simple());
+            let prompt_params = json!({
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": prompt}],
+                "_meta": {
+                    "codebuddy.ai/requestId": message_id,
+                    "codebuddy.ai/messageRequestId": message_id,
+                    "codebuddy.ai/userMessageId": message_id,
+                    "codebuddy.ai/messageId": message_id,
+                },
+            });
+            let mut complete = false;
+            let mut disconnected = false;
+            self.rpc(
+                &client,
+                &connection,
+                &token,
+                4,
+                "session/prompt",
+                prompt_params,
+                |e| {
+                    let update = e.pointer("/params/update").and_then(Value::as_object);
+                    let metadata = update
+                        .and_then(|value| value.get("_meta"))
+                        .and_then(Value::as_object);
+                    let event_message_id = update
+                        .and_then(|value| value.get("messageId"))
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            metadata
+                                .and_then(|value| value.get("codebuddy.ai/messageId"))
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| {
+                            metadata
+                                .and_then(|value| value.get("messageId"))
+                                .and_then(Value::as_str)
+                        });
+                    let is_current_message = e
+                        .get("method")
+                        .and_then(Value::as_str)
+                        == Some("session/update")
+                        && e.pointer("/params/sessionId").and_then(Value::as_str)
+                            == Some(session_id.as_str())
+                        && e.pointer("/params/update/sessionUpdate")
+                            .and_then(Value::as_str)
+                            == Some("agent_message_chunk")
+                        && event_message_id == Some(message_id.as_str());
+                    if is_current_message {
+                        if let Some(text) = e
+                            .pointer("/params/update/content/text")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            emitted.store(true, Ordering::Release);
+                            match tx.try_send(Ok(NormalizedEvent::TextDelta(text.into()))) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => disconnected = true,
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    return Err(AcpError::new(
+                                        "WorkBuddy ACP downstream buffer is full",
+                                        "capacity",
+                                    ));
+                                }
+                            }
+                        }
+                    } else if e.get("id").and_then(Value::as_i64) == Some(4) {
+                        let reason = e
+                            .pointer("/result/stopReason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if reason == "end_turn" {
+                            complete = true;
+                        } else {
+                            return Err(prompt_stop_error(e, reason));
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .await?;
             if disconnected { self.cancel(&client,&connection,&token,&session_id).await; return Ok(()); }
-            if !complete{return Err(AcpError::new("WorkBuddy ACP prompt ended without completion","protocol"));}let _=tx.send(Ok(NormalizedEvent::Completed)).await;Ok(())}.await;
+            if !complete{return Err(AcpError::new("WorkBuddy ACP prompt ended without completion","protocol"));}
+            if !emitted.load(Ordering::Acquire) {
+                return Err(
+                    AcpError::new("WorkBuddy ACP returned no response for this request", "protocol")
+                        .retryable(true),
+                );
+            }
+            let _=tx.send(Ok(NormalizedEvent::Completed)).await;Ok(())}.await;
         if result.is_err() && !session_id.is_empty() && tx.is_closed() {
             self.cancel(&client, &connection, &token, &session_id).await;
         }
@@ -437,28 +535,53 @@ pub fn prompt_stop_error_for_test(event: &Value, reason: &str) -> AcpError {
 }
 
 pub fn discover_all(root: Option<&Path>) -> Vec<String> {
-    let root = root.map(PathBuf::from).unwrap_or_else(|| {
-        std::env::var("CODEBUDDY_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::home_dir()
-                    .unwrap_or_default()
-                    .join(".workbuddy-ai")
-            })
-    });
-    let Ok(read) = std::fs::read_dir(root.join("sessions")) else {
-        return vec![];
+    let roots = if let Some(root) = root {
+        vec![root.to_path_buf()]
+    } else {
+        let mut roots = Vec::new();
+        for name in ["WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR"] {
+            if let Ok(value) = std::env::var(name)
+                && !value.trim().is_empty()
+            {
+                roots.push(PathBuf::from(value));
+            }
+        }
+        if let Some(home) = std::env::home_dir() {
+            roots.extend(
+                [".workbuddy", ".codebuddy", ".workbuddy-ai"]
+                    .into_iter()
+                    .map(|name| home.join(name)),
+            );
+        }
+        let mut unique = Vec::new();
+        let mut seen = HashSet::new();
+        for root in roots {
+            let key = root.to_string_lossy().to_ascii_lowercase();
+            if seen.insert(key) {
+                unique.push(root);
+            }
+        }
+        unique
     };
-    let mut files: Vec<_> = read
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .collect();
-    files.sort_by_key(|e| std::cmp::Reverse(e.metadata().and_then(|m| m.modified()).ok()));
+    let mut files = Vec::new();
+    for root in roots {
+        let Ok(read) = std::fs::read_dir(root.join("sessions")) else {
+            continue;
+        };
+        files.extend(
+            read.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                .map(|entry| entry.path()),
+        );
+    }
+    files.sort_by_key(|path| {
+        std::cmp::Reverse(std::fs::metadata(path).and_then(|m| m.modified()).ok())
+    });
     let mut seen = HashSet::new();
     files
         .into_iter()
         .filter_map(|e| {
-            let v: Value = serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?;
+            let v: Value = serde_json::from_slice(&std::fs::read(e).ok()?).ok()?;
             let pid = v.get("pid")?.as_i64()?;
             if !Path::new(&format!("/proc/{pid}")).exists() {
                 return None;
@@ -469,13 +592,30 @@ pub fn discover_all(root: Option<&Path>) -> Vec<String> {
                 .as_str()?
                 .trim_end_matches('/')
                 .to_string();
+            if !is_loopback_url(&url) {
+                return None;
+            }
             seen.insert(url.clone()).then_some(url)
         })
         .collect()
 }
+
+fn is_loopback_url(value: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(value) else {
+        return false;
+    };
+    if parsed.scheme() != "http" || parsed.port().is_none() {
+        return false;
+    }
+    match parsed.host_str() {
+        Some("localhost") => true,
+        Some(host) => host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()),
+        None => false,
+    }
+}
 pub fn candidate_urls(c: &Config) -> Vec<String> {
     let mut urls = discover_all(None);
-    if !c.workbuddy_acp_url.is_empty() && !urls.contains(&c.workbuddy_acp_url) {
+    if is_loopback_url(&c.workbuddy_acp_url) && !urls.contains(&c.workbuddy_acp_url) {
         urls.push(c.workbuddy_acp_url.clone());
     }
     urls

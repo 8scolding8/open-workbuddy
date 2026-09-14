@@ -62,6 +62,61 @@ class WorkBuddyAcpTransportTests(unittest.TestCase):
 
         self.assertEqual(asyncio.run(run())[0]["id"], 1)
 
+    def test_session_update_text_is_bound_to_current_session(self):
+        stale = {
+            "method": "session/update",
+            "params": {
+                "sessionId": "other-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "stale"},
+                },
+            },
+        }
+        current = {
+            "method": "session/update",
+            "params": {
+                "sessionId": "current-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "current"},
+                },
+            },
+        }
+        self.assertIsNone(WorkBuddyAcpTransport._session_text_delta(stale, "current-session"))
+        self.assertEqual(
+            WorkBuddyAcpTransport._session_text_delta(current, "current-session"),
+            "current",
+        )
+
+    def test_session_update_text_is_bound_to_request_message(self):
+        event = {
+            "method": "session/update",
+            "params": {
+                "sessionId": "current-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "_meta": {"codebuddy.ai/messageId": "current-message"},
+                    "content": {"type": "text", "text": "current"},
+                },
+            },
+        }
+        self.assertIsNone(
+            WorkBuddyAcpTransport._session_text_delta(
+                event,
+                "current-session",
+                "stale-message",
+            )
+        )
+        self.assertEqual(
+            WorkBuddyAcpTransport._session_text_delta(
+                event,
+                "current-session",
+                "current-message",
+            ),
+            "current",
+        )
+
     def test_normalized_event_does_not_contain_secrets(self):
         event = NormalizedEvent("text_delta", text="hello")
         self.assertEqual(event.text, "hello")
@@ -107,6 +162,18 @@ class WorkBuddyAcpTransportTests(unittest.TestCase):
         self.assertEqual(transport.base_url, "http://127.0.0.1:22222")
         self.assertEqual(transport.password, "configured-secret")
 
+    def test_from_config_rejects_non_loopback_configured_gateway(self):
+        class Config:
+            WORKBUDDY_ACP_URL = "http://example.test:44741"
+            WORKBUDDY_ACP_PASSWORD = "configured-secret"
+            WORKBUDDY_ACP_CWD = "/tmp"
+            WORKBUDDY_ACP_TIMEOUT = 30
+
+        with patch.object(WorkBuddyAcpTransport, "discover_all", return_value=[]):
+            with self.assertRaises(WorkBuddyAcpError) as caught:
+                WorkBuddyAcpTransport.from_config(Config)
+        self.assertEqual(caught.exception.category, "configuration")
+
     def test_http_error_classification(self):
         auth = WorkBuddyAcpError.from_http_status("connection", 403)
         capacity = WorkBuddyAcpError.from_http_status("connection", 503)
@@ -127,6 +194,23 @@ class WorkBuddyAcpTransportTests(unittest.TestCase):
             self.assertEqual(
                 WorkBuddyAcpTransport.discover_all(Path(temp_dir)),
                 ["http://127.0.0.1:22222"],
+            )
+
+    def test_discovery_rejects_non_loopback_urls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sessions = Path(temp_dir) / "sessions"
+            sessions.mkdir()
+            (sessions / "external.json").write_text(
+                json.dumps({"pid": os.getpid(), "url": "http://example.test:22222"}),
+                encoding="utf-8",
+            )
+            (sessions / "loopback.json").write_text(
+                json.dumps({"pid": os.getpid(), "url": "http://localhost:22223/"}),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                WorkBuddyAcpTransport.discover_all(Path(temp_dir)),
+                ["http://localhost:22223"],
             )
 
     def test_windows_liveness_probe_uses_bounded_handle_wait(self):

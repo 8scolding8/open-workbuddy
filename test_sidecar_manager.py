@@ -7,10 +7,41 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from session_store import SessionStore
-from sidecar_manager import SidecarManager
+from sidecar_manager import SIDECAR_ENV_ALLOWLIST, SidecarManager
 
 
 class SidecarManagerTests(unittest.IsolatedAsyncioTestCase):
+    def test_sidecar_environment_excludes_credentials_and_loader_injection(self):
+        with patch.dict(
+            "sidecar_manager.os.environ",
+            {
+                "PATH": "path",
+                "USERPROFILE": "profile",
+                "CODEBUDDY_CONFIG_DIR": "config",
+                "FREEMODEL_API_KEY": "secret",
+                "OPENAI_API_KEY": "secret",
+                "WORKBUDDY_ACP_PASSWORD": "secret",
+                "CODEBUDDY_GATEWAY_PASSWORD": "secret",
+                "PYTHONPATH": "unsafe",
+                "LD_LIBRARY_PATH": "unsafe",
+            },
+            clear=True,
+        ):
+            environment = SidecarManager._sidecar_environment()
+
+        self.assertEqual(environment["PATH"], "path")
+        self.assertEqual(environment["CODEBUDDY_CONFIG_DIR"], "config")
+        for name in (
+            "FREEMODEL_API_KEY",
+            "OPENAI_API_KEY",
+            "WORKBUDDY_ACP_PASSWORD",
+            "CODEBUDDY_GATEWAY_PASSWORD",
+            "PYTHONPATH",
+            "LD_LIBRARY_PATH",
+        ):
+            self.assertNotIn(name, environment)
+        self.assertTrue(SIDECAR_ENV_ALLOWLIST)
+
     async def test_stop_does_not_signal_unowned_process(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"

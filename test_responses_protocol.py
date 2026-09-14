@@ -25,6 +25,44 @@ class ResponsesProtocolTests(unittest.IsolatedAsyncioTestCase):
 
         return factory
 
+    async def test_oversized_request_body_is_rejected_before_upstream(self):
+        called = False
+
+        async def handler(request):
+            nonlocal called
+            called = True
+            return httpx.Response(200, json={"choices": []})
+
+        response = await self.call_app(
+            {"model": "hy3", "input": "x" * proxy_server.MAX_REQUEST_BODY_BYTES},
+            handler,
+        )
+
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.json()["error"]["type"], "request_too_large")
+        self.assertFalse(called)
+
+    async def test_oversized_upstream_sse_event_fails_without_completion(self):
+        async def handler(request):
+            return httpx.Response(
+                200,
+                content=("data: " + "x" * (proxy_server.MAX_SSE_BUFFER_BYTES + 1)).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        response = await self.call_app(
+            {"model": "hy3", "input": "Hello", "stream": True},
+            handler,
+        )
+
+        events = self.parse_sse(response)
+        self.assertEqual(events[-1][0], "response.failed")
+        self.assertEqual(
+            events[-1][1]["response"]["error"]["code"],
+            "upstream_stream_too_large",
+        )
+        self.assertNotIn("response.completed", [name for name, _ in events])
+
     async def call_app(self, payload, handler):
         transport = httpx.ASGITransport(app=proxy_server.app)
         async with self.original_async_client(

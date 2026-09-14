@@ -210,6 +210,58 @@ async fn direct_nonstreaming_uses_configured_upstream_auth_and_converts_response
 }
 
 #[tokio::test]
+async fn direct_nonstreaming_forwards_client_auth_when_no_upstream_key_is_configured() {
+    let (base, recorded) = recording_upstream().await;
+    let (_root, state) = direct_state(&base);
+    let response = router(state)
+        .layer(MockConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))))
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer client-key")
+                .body(Body::from(r#"{"model":"hy3","input":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        recorded.authorization.lock().unwrap().as_deref(),
+        Some("Bearer client-key")
+    );
+}
+
+#[tokio::test]
+async fn direct_nonstreaming_does_not_forward_local_proxy_key_upstream() {
+    let (base, recorded) = recording_upstream().await;
+    let (_root, mut state) = direct_state(&base);
+    let mut config = (*state.config).clone();
+    config.proxy_api_key = "local-key".into();
+    state.config = std::sync::Arc::new(config);
+    let response = router(state)
+        .layer(MockConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            40000,
+        ))))
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer local-key")
+                .body(Body::from(r#"{"model":"hy3","input":"hello"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(recorded.authorization.lock().unwrap().as_deref(), None);
+}
+
+#[tokio::test]
 async fn direct_responses_preserves_codex_tools_and_images_without_reading_project_files() {
     let (base, recorded) = recording_upstream().await;
     let (root, state) = direct_state(&base);

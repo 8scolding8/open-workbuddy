@@ -38,6 +38,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.DEFAULT_BASE_URL, "https://work.freemodel.dev/v1")
         self.assertEqual(config.TRANSPORT, "workbuddy_acp")
         self.assertEqual(config.WORKBUDDY_CLI_PATH, "codebuddy")
+        self.assertEqual(config.WORKBUDDY_ACP_URL, "")
         self.assertEqual(config.DEFAULT_HOST, "127.0.0.1")
         self.assertEqual(config.PROXY_API_KEY, "")
 
@@ -49,6 +50,20 @@ class ConfigTests(unittest.TestCase):
             )
 
         self.assertEqual(config.PROXY_API_KEY, "local-secret")
+
+    def test_non_loopback_bind_requires_local_proxy_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "PROXY_API_KEY is required"):
+                load_config(Path(directory) / "config.json", {"PROXY_HOST": "0.0.0.0"})
+
+    def test_non_loopback_bind_accepts_local_proxy_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(
+                Path(directory) / "config.json",
+                {"PROXY_HOST": "0.0.0.0", "PROXY_API_KEY": "local-secret"},
+            )
+
+        self.assertEqual(config.DEFAULT_HOST, "0.0.0.0")
 
     def test_reads_saved_base_url_and_strips_trailing_slash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -165,6 +180,49 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.DEFAULT_API_KEY, "fe_test_secret")
         self.assertNotIn("fe_test_secret", CONFIG_PATH.read_text(encoding="utf-8"))
+
+    def test_runtime_catalog_merges_active_and_tool_capable_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime.info"
+            runtime.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "models": [
+                                {"id": "hy3", "supportsToolCall": True},
+                                {
+                                    "id": "deepseek-v4.1-flash",
+                                    "supportsToolCall": True,
+                                    "created": "not-a-timestamp",
+                                },
+                                {"id": "image-only", "supportsToolCall": False},
+                            ],
+                            "agents": [{"models": ["deepseek-v4.1-flash"]}],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(
+                root / "config.json",
+                {"WORKBUDDY_RUNTIME_MODEL_CONFIG": str(runtime)},
+            )
+
+            models = config.AVAILABLE_MODELS
+
+        self.assertEqual([model["id"] for model in models], ["deepseek-v4.1-flash", "hy3"])
+        self.assertGreaterEqual(models[0]["created"], 0)
+
+    def test_non_string_model_is_rejected_before_normalization(self):
+        import proxy_server
+
+        self.assertEqual(
+            proxy_server.validate_chat_body(
+                {"model": 123, "messages": [{"role": "user", "content": "hi"}]}
+            ),
+            "model must be a string",
+        )
 
 
 if __name__ == "__main__":

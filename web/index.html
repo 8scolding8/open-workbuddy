@@ -276,7 +276,7 @@
           </div>
           <div class="hero-meta" aria-label="当前代理信息">
             <div class="hero-meta-row"><span>默认模型</span><strong id="hero-model">—</strong></div>
-            <div class="hero-meta-row"><span>可调用模型</span><strong id="hero-count">—</strong></div>
+            <div class="hero-meta-row"><span>模型目录</span><strong id="hero-count">—</strong></div>
             <div class="hero-meta-row"><span>协议</span><strong>ACP → OpenAI</strong></div>
           </div>
         </section>
@@ -317,8 +317,9 @@
                 <div class="health-list">
                   <div class="health-row"><span>服务</span><strong class="inline-state"><span class="status-dot"></span><span id="health-service">检查中…</span></strong></div>
                   <div class="health-row"><span>传输</span><strong id="health-transport">—</strong></div>
+                  <div class="health-row"><span>ACP 网关</span><strong id="health-gateway">—</strong></div>
                   <div class="health-row"><span>上游</span><strong id="health-upstream">—</strong></div>
-                  <div class="health-row"><span>API Key</span><strong>本地占位符可用</strong></div>
+                  <div class="health-row"><span>API Key</span><strong id="health-auth">—</strong></div>
                   <div class="health-row"><span>绑定</span><strong>127.0.0.1</strong></div>
                 </div>
               </div>
@@ -415,7 +416,14 @@
       $("#status-text").textContent = ok ? "代理运行中" : "代理不可用";
       $("#health-service").textContent = ok ? "open-workbuddy" : "不可用";
       $("#health-transport").textContent = health.transport || "—";
+      const gatewayCount = Number(health.active_gateway_count || 0);
+      $("#health-gateway").textContent = health.gateway_mode === "active"
+        ? `复用活动网关（${gatewayCount}）`
+        : health.gateway_mode === "configured"
+        ? "使用手动配置网关"
+        : "无活动网关，按需启动 sidecar";
       $("#health-upstream").textContent = health.upstream || "—";
+      $("#health-auth").textContent = state.config?.proxy_api_key_configured ? "已启用（需本地 key）" : "未启用（无需 key）";
       $("#health-time").textContent = new Date().toLocaleTimeString();
     }
 
@@ -446,16 +454,17 @@
     function renderExamples() {
       const base = state.config?.base_url || `${window.location.origin}/v1`;
       const model = selectedModel().id || state.selected || "hy3";
+      const auth = state.config?.proxy_api_key_configured
+        ? '  -H "Authorization: Bearer YOUR_PROXY_API_KEY" \\\n'
+        : "";
       const chat = `curl ${base}/chat/completions \\
-  -H "Authorization: Bearer local-proxy" \\
-  -H "Content-Type: application/json" \\
+${auth}  -H "Content-Type: application/json" \\
   -d '{
     "model": "${model}",
     "messages": [{"role": "user", "content": "你好，WorkBuddy！"}]
-  }'`;
+      }'`;
       const responses = `curl ${base}/responses \\
-  -H "Authorization: Bearer local-proxy" \\
-  -H "Content-Type: application/json" \\
+${auth}  -H "Content-Type: application/json" \\
   -d '{
     "model": "${model}",
     "input": "你好，WorkBuddy！"

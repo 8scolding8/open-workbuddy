@@ -384,8 +384,21 @@ fn proxy_auth_error() -> Response {
     )
 }
 
-fn auth(_headers: &HeaderMap, c: &Config) -> Option<String> {
-    (!c.api_key.is_empty()).then(|| format!("Bearer {}", c.api_key))
+fn auth(headers: &HeaderMap, c: &Config) -> Option<String> {
+    if !c.api_key.is_empty() {
+        return Some(format!("Bearer {}", c.api_key));
+    }
+    if !c.proxy_api_key.is_empty() {
+        return None;
+    }
+    let supplied = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| !matches!(*value, "sk-dummy" | "dummy" | "placeholder"));
+    supplied.map(|value| format!("Bearer {value}"))
 }
 fn json_error(status: StatusCode, message: &str, kind: &str) -> Response {
     (
@@ -444,6 +457,7 @@ async fn resolve_acp(
         messages,
         &s.store,
         &s.sidecars,
+        &s.config,
         s.config.default_project.to_string_lossy().as_ref(),
     )
     .await
@@ -453,6 +467,7 @@ async fn open_acp(
     url: &str,
     project: &str,
     messages: Vec<Value>,
+    model: &str,
 ) -> Result<crate::acp::AcpEventStream, AcpError> {
     open_acp_with_attempts(
         s,
@@ -460,6 +475,7 @@ async fn open_acp(
         project,
         messages,
         s.config.workbuddy_acp_max_attempts,
+        model,
     )
     .await
 }
@@ -470,10 +486,15 @@ async fn open_acp_with_attempts(
     project: &str,
     messages: Vec<Value>,
     attempts: usize,
+    model: &str,
 ) -> Result<crate::acp::AcpEventStream, AcpError> {
     let guard = s.gateways.acquire(url).await;
-    let transport =
-        AcpTransport::from_config(&s.config, Some(url), Some(std::path::Path::new(project)))?;
+    let transport = AcpTransport::from_config(
+        &s.config,
+        Some(url),
+        Some(std::path::Path::new(project)),
+        Some(model),
+    )?;
     Ok(transport
         .stream_chat_with_attempts(messages, attempts)
         .with_gateway_guard(guard))
@@ -483,6 +504,7 @@ async fn first_acp(
     url: &str,
     project: &str,
     messages: Vec<Value>,
+    model: &str,
 ) -> Result<(NormalizedEvent, crate::acp::AcpEventStream), AcpError> {
     let mut stream = open_acp_with_attempts(
         s,
@@ -490,6 +512,7 @@ async fn first_acp(
         project,
         messages,
         s.config.workbuddy_acp_max_attempts,
+        model,
     )
     .await?;
     match stream.next().await {
@@ -530,10 +553,11 @@ async fn chat(
             Err(e) => return e.into_response(),
         };
         if streaming {
-            let (first, mut events) = match first_acp(&s, &url, &session.project, messages).await {
-                Ok(v) => v,
-                Err(e) => return ProxyError::Acp(e).into_response(),
-            };
+            let (first, mut events) =
+                match first_acp(&s, &url, &session.project, messages, &model).await {
+                    Ok(v) => v,
+                    Err(e) => return ProxyError::Acp(e).into_response(),
+                };
             let id = format!("chatcmpl-{}", &Uuid::new_v4().simple().to_string()[..24]);
             let model2 = model.clone();
             return stream_response(
@@ -541,7 +565,7 @@ async fn chat(
                 Some(&session),
             );
         }
-        let mut stream = match open_acp(&s, &url, &session.project, messages).await {
+        let mut stream = match open_acp(&s, &url, &session.project, messages, &model).await {
             Ok(v) => v,
             Err(e) => return ProxyError::Acp(e).into_response(),
         };
@@ -766,7 +790,7 @@ async fn responses(
                 Ok(v) => v,
                 Err(e) => return e.into_response(),
             };
-            let mut events = match open_acp(&s, &url, &session.project, messages).await {
+            let mut events = match open_acp(&s, &url, &session.project, messages, &model).await {
                 Ok(v) => v,
                 Err(e) => return ProxyError::Acp(e).into_response(),
             };
@@ -841,10 +865,11 @@ async fn responses(
             Ok(v) => v,
             Err(e) => return e.into_response(),
         };
-        let (first, mut events) = match first_acp(&s, &url, &session.project, messages).await {
-            Ok(v) => v,
-            Err(e) => return ProxyError::Acp(e).into_response(),
-        };
+        let (first, mut events) =
+            match first_acp(&s, &url, &session.project, messages, &model).await {
+                Ok(v) => v,
+                Err(e) => return ProxyError::Acp(e).into_response(),
+            };
         let response_id = format!("resp_{}", &Uuid::new_v4().simple().to_string()[..24]);
         let message_id = format!("msg_{}", &Uuid::new_v4().simple().to_string()[..24]);
         let model2 = model.clone();

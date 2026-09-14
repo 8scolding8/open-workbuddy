@@ -29,6 +29,10 @@ from upstream_transport import NormalizedEvent, WorkBuddyAcpError, WorkBuddyAcpT
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("open-workbuddy")
 
+MAX_REQUEST_BODY_BYTES = 16 * 1024 * 1024
+MAX_UPSTREAM_JSON_BYTES = 16 * 1024 * 1024
+MAX_SSE_BUFFER_BYTES = 1024 * 1024
+
 session_store = SessionStore(config.PROXY_SESSION_STORE, config.PROXY_MAX_HISTORY_TURNS)
 sidecar_manager = SidecarManager(
     session_store,
@@ -82,7 +86,7 @@ app.add_middleware(
 def normalize_model(model_name: str | None) -> str:
     """Normalize client aliases to the configured WorkBuddy model."""
     config.refresh_available_models()
-    if not model_name:
+    if not model_name or not isinstance(model_name, str):
         return sidecar_manager.model
     cleaned = model_name.strip().lower()
     aliases = {
@@ -475,6 +479,52 @@ def error_json(status_code: int, message: str, error_type: str = "upstream_error
     )
 
 
+class RequestBodyError(ValueError):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def read_json_body(request: Request):
+    """Read a JSON request with the same bounded body policy as the Rust server."""
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared_length = int(content_length)
+        except ValueError as exc:
+            raise RequestBodyError("Invalid Content-Length", 400) from exc
+        if declared_length < 0:
+            raise RequestBodyError("Invalid Content-Length", 400)
+        if declared_length > MAX_REQUEST_BODY_BYTES:
+            raise RequestBodyError("Request body exceeded the maximum size", 413)
+
+    chunks = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_REQUEST_BODY_BYTES:
+            raise RequestBodyError("Request body exceeded the maximum size", 413)
+        chunks.append(chunk)
+    try:
+        return json.loads(b"".join(chunks))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RequestBodyError("Invalid JSON payload", 400) from exc
+
+
+async def read_bounded_response(response: httpx.Response) -> bytes:
+    chunks = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > MAX_UPSTREAM_JSON_BYTES:
+            raise UpstreamStreamError(
+                "Upstream response exceeded the maximum size",
+                "upstream_response_too_large",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def acp_error_response(exc: WorkBuddyAcpError) -> JSONResponse:
     status = exc.status_code if exc.status_code and exc.status_code >= 400 else 502
     return error_json(status, str(exc), "workbuddy_acp_error")
@@ -490,11 +540,38 @@ class UpstreamStreamError(RuntimeError):
         self.code = code
 
 
+async def iter_sse_lines(response: httpx.Response):
+    """Yield SSE lines while bounding an unterminated event buffer."""
+    buffer = bytearray()
+    async for chunk in response.aiter_bytes():
+        buffer.extend(chunk)
+        while True:
+            try:
+                position = buffer.index(10)
+            except ValueError:
+                break
+            if position > MAX_SSE_BUFFER_BYTES:
+                raise UpstreamStreamError(
+                    "Upstream SSE event exceeded the maximum buffer size",
+                    "upstream_stream_too_large",
+                )
+            raw = bytes(buffer[:position])
+            del buffer[: position + 1]
+            yield raw.decode("utf-8", errors="replace")
+        if len(buffer) > MAX_SSE_BUFFER_BYTES:
+            raise UpstreamStreamError(
+                "Upstream SSE event exceeded the maximum buffer size",
+                "upstream_stream_too_large",
+            )
+    if buffer:
+        yield bytes(buffer).decode("utf-8", errors="replace")
+
+
 async def iter_chat_sse(response: httpx.Response):
     """Parse Chat Completions SSE and produce one explicit completion event."""
     saw_event = False
     saw_terminal = False
-    async for line in response.aiter_lines():
+    async for line in iter_sse_lines(response):
         stripped = line.strip()
         if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
             continue
@@ -543,6 +620,8 @@ async def iter_chat_sse(response: httpx.Response):
 def validate_chat_body(body) -> str | None:
     if not isinstance(body, dict):
         return "Request body must be a JSON object"
+    if body.get("model") is not None and not isinstance(body.get("model"), str):
+        return "model must be a string"
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return "messages must be a non-empty array"
@@ -554,6 +633,8 @@ def validate_chat_body(body) -> str | None:
 def validate_responses_body(body) -> str | None:
     if not isinstance(body, dict):
         return "Request body must be a JSON object"
+    if body.get("model") is not None and not isinstance(body.get("model"), str):
+        return "model must be a string"
     if not any(key in body for key in ("input", "messages", "prompt")):
         return "one of input, messages, or prompt is required"
     if "messages" in body and not isinstance(body["messages"], list):
@@ -592,16 +673,33 @@ async def resolve_proxy_session(request: Request, messages: list[dict]) -> tuple
     else:
         session = await session_store.get_or_create_automatic(project, messages)
 
-    try:
-        gateway_url = await sidecar_manager.ensure(session)
-    except SidecarError as exc:
-        raise WorkBuddyAcpError(str(exc), category="configuration", status_code=503) from exc
+    # Reuse a live official WorkBuddy/CodeBuddy gateway first. This keeps the
+    # user's existing authenticated desktop session usable without copying its
+    # credentials. Only create a proxy-owned sidecar when no live gateway is
+    # registered locally.
+    candidates = WorkBuddyAcpTransport.candidate_urls(config)
+    if candidates:
+        gateway_url = candidates[0]
+    else:
+        try:
+            gateway_url = await sidecar_manager.ensure(session)
+        except SidecarError as exc:
+            raise WorkBuddyAcpError(str(exc), category="configuration", status_code=503) from exc
     return session, gateway_url
 
 
 @app.get("/health")
 async def health_check():
     config.refresh_available_models()
+    active_gateway_count = len(WorkBuddyAcpTransport.discover_all())
+    configured_gateway = bool(config.WORKBUDDY_ACP_URL)
+    gateway_mode = (
+        "active"
+        if active_gateway_count
+        else "configured"
+        if configured_gateway
+        else "sidecar_on_demand"
+    )
     return {
         "status": "ok",
         "service": "open-workbuddy",
@@ -609,6 +707,9 @@ async def health_check():
         "transport": config.TRANSPORT,
         "model": sidecar_manager.model,
         "model_count": len(AVAILABLE_MODELS),
+        "active_gateway_count": active_gateway_count,
+        "configured_gateway": configured_gateway,
+        "gateway_mode": gateway_mode,
     }
 
 
@@ -643,6 +744,7 @@ async def proxy_config(request: Request):
             "chat_completions": f"{base_url}/chat/completions",
             "models": f"{base_url}/models",
         },
+        "proxy_api_key_configured": bool(config.PROXY_API_KEY),
         "loopback_only": True,
     }
 
@@ -654,9 +756,13 @@ async def select_proxy_model(request: Request):
         return denied
     config.refresh_available_models()
     try:
-        body = await request.json()
-    except Exception:
-        return error_json(400, "Invalid JSON payload", "invalid_request_error")
+        body = await read_json_body(request)
+    except RequestBodyError as exc:
+        return error_json(
+            exc.status_code,
+            str(exc),
+            "request_too_large" if exc.status_code == 413 else "invalid_request_error",
+        )
     if not isinstance(body, dict):
         return error_json(400, "Request body must be a JSON object", "invalid_request_error")
     requested = str(body.get("model") or "").strip()
@@ -701,11 +807,17 @@ async def create_proxy_session(request: Request):
     if denied:
         return denied
     try:
-        body = await request.json()
+        body = await read_json_body(request)
         if not isinstance(body, dict):
             raise ValueError("Request body must be a JSON object")
         session = await session_store.create(body.get("project", ""), body.get("title", ""))
         return JSONResponse(status_code=201, content=session)
+    except RequestBodyError as exc:
+        return error_json(
+            exc.status_code,
+            str(exc),
+            "request_too_large" if exc.status_code == 413 else "invalid_request_error",
+        )
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return error_json(400, str(exc), "invalid_request_error")
 
@@ -730,13 +842,19 @@ async def append_proxy_session_history(session_id: str, request: Request):
     if denied:
         return denied
     try:
-        body = await request.json()
+        body = await read_json_body(request)
         if not isinstance(body, dict):
             raise ValueError("Request body must be a JSON object")
         messages = body.get("messages")
         if not isinstance(messages, list):
             raise ValueError("messages must be an array")
         return await session_store.append_history(session_id, messages)
+    except RequestBodyError as exc:
+        return error_json(
+            exc.status_code,
+            str(exc),
+            "request_too_large" if exc.status_code == 413 else "invalid_request_error",
+        )
     except (ValueError, json.JSONDecodeError) as exc:
         return error_json(400, str(exc), "invalid_request_error")
     except KeyError:
@@ -763,9 +881,13 @@ async def chat_completions(request: Request):
     if not proxy_auth_allowed(request):
         return error_json(401, "Invalid proxy API key", "authentication_error")
     try:
-        body = await request.json()
-    except Exception:
-        return error_json(400, "Invalid JSON payload", "invalid_request_error")
+        body = await read_json_body(request)
+    except RequestBodyError as exc:
+        return error_json(
+            exc.status_code,
+            str(exc),
+            "request_too_large" if exc.status_code == 413 else "invalid_request_error",
+        )
     validation_error = validate_chat_body(body)
     if validation_error:
         return error_json(400, validation_error, "invalid_request_error")
@@ -797,7 +919,7 @@ async def chat_completions(request: Request):
                 model=model,
             )
             try:
-                first_event = await anext(acp_events)
+                first_event = await acp_events.__anext__()
             except StopAsyncIteration:
                 await acp_events.aclose()
                 return error_json(502, "WorkBuddy ACP ended without completion", "workbuddy_acp_error")
@@ -885,8 +1007,13 @@ async def chat_completions(request: Request):
             logger.error("Upstream chat stream connection error: %s", type(exc).__name__)
             return error_json(502, "Unable to connect to upstream stream", "proxy_error")
         if upstream_response.status_code != 200:
-            raw_error = await upstream_response.aread()
             status_code = upstream_response.status_code
+            try:
+                raw_error = await read_bounded_response(upstream_response)
+            except UpstreamStreamError:
+                await upstream_response.aclose()
+                await client.aclose()
+                return error_json(502, "Upstream error response exceeded the maximum size", "upstream_error")
             await upstream_response.aclose()
             await client.aclose()
             try:
@@ -931,8 +1058,12 @@ async def chat_completions(request: Request):
         return error_json(502, "Unable to connect to upstream", "proxy_error")
 
     try:
-        result = response.json()
-    except Exception:
+        raw_response = await read_bounded_response(response)
+    except UpstreamStreamError:
+        return error_json(502, "Upstream response exceeded the maximum size", "upstream_error")
+    try:
+        result = json.loads(raw_response)
+    except (UnicodeDecodeError, json.JSONDecodeError):
         if response.status_code >= 400:
             return error_json(response.status_code, "Upstream request failed", "upstream_error")
         return error_json(502, "Upstream returned invalid JSON", "upstream_error")
@@ -945,9 +1076,13 @@ async def responses_endpoint(request: Request):
     if not proxy_auth_allowed(request):
         return error_json(401, "Invalid proxy API key", "authentication_error")
     try:
-        body = await request.json()
-    except Exception:
-        return error_json(400, "Invalid JSON payload", "invalid_request_error")
+        body = await read_json_body(request)
+    except RequestBodyError as exc:
+        return error_json(
+            exc.status_code,
+            str(exc),
+            "request_too_large" if exc.status_code == 413 else "invalid_request_error",
+        )
     validation_error = validate_responses_body(body)
     if validation_error:
         return error_json(400, validation_error, "invalid_request_error")
@@ -993,7 +1128,7 @@ async def responses_endpoint(request: Request):
             model=model,
         )
         try:
-            first_event = await anext(acp_events)
+            first_event = await acp_events.__anext__()
         except StopAsyncIteration:
             await acp_events.aclose()
             return error_json(502, "WorkBuddy ACP ended without completion", "workbuddy_acp_error")
@@ -1105,8 +1240,12 @@ async def responses_endpoint(request: Request):
             return error_json(502, "Unable to connect to upstream", "proxy_error")
 
         try:
-            result = response.json()
-        except Exception:
+            raw_response = await read_bounded_response(response)
+        except UpstreamStreamError:
+            return error_json(502, "Upstream response exceeded the maximum size", "upstream_error")
+        try:
+            result = json.loads(raw_response)
+        except (UnicodeDecodeError, json.JSONDecodeError):
             if response.status_code >= 400:
                 return error_json(response.status_code, "Upstream request failed", "upstream_error")
             return error_json(502, "Upstream returned invalid JSON", "upstream_error")
@@ -1124,16 +1263,22 @@ async def responses_endpoint(request: Request):
         return error_json(502, "Unable to connect to upstream stream", "proxy_error")
 
     if upstream_response.status_code != 200:
-        raw_error = await upstream_response.aread()
+        status_code = upstream_response.status_code
+        try:
+            raw_error = await read_bounded_response(upstream_response)
+        except UpstreamStreamError:
+            await upstream_response.aclose()
+            await client.aclose()
+            return error_json(502, "Upstream error response exceeded the maximum size", "upstream_error")
         await upstream_response.aclose()
         await client.aclose()
         error_text = raw_error.decode("utf-8", errors="ignore")
-        logger.error("Upstream responses status %s: %s", upstream_response.status_code, error_text)
+        logger.error("Upstream responses status %s: %s", status_code, error_text)
         try:
             error_content = json.loads(error_text)
         except Exception:
             error_content = {"error": {"message": error_text, "type": "upstream_error"}}
-        return JSONResponse(status_code=upstream_response.status_code, content=error_content)
+        return JSONResponse(status_code=status_code, content=error_content)
 
     response_id = f"resp_{uuid.uuid4().hex[:24]}"
     message_id = f"msg_{uuid.uuid4().hex[:24]}"

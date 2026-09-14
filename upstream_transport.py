@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import ctypes
 from dataclasses import dataclass
+import ipaddress
 import json
 import logging
 import os
 from pathlib import Path
 from typing import AsyncIterator
+from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -133,7 +136,7 @@ class WorkBuddyAcpTransport:
     def candidate_urls(cls, config) -> list[str]:
         discovered = cls.discover_all()
         configured = str(config.WORKBUDDY_ACP_URL or "").rstrip("/")
-        if configured and configured not in discovered:
+        if configured and cls._is_loopback_url(configured) and configured not in discovered:
             discovered.append(configured)
         return discovered
 
@@ -184,17 +187,91 @@ class WorkBuddyAcpTransport:
         return Path(f"/proc/{pid}").exists()
 
     @staticmethod
-    def discover_all(config_dir: Path | None = None) -> list[str]:
-        root = config_dir or Path(os.environ.get("CODEBUDDY_CONFIG_DIR", Path.home() / ".workbuddy-ai"))
-        sessions = root / "sessions"
+    def _discovery_roots(config_dir: Path | None = None) -> list[Path]:
+        if config_dir is not None:
+            return [Path(config_dir)]
+        roots: list[Path] = []
+        for variable in ("WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR"):
+            configured = str(os.environ.get(variable) or "").strip()
+            if configured:
+                roots.append(Path(configured).expanduser())
+        roots.extend(
+            Path.home() / name
+            for name in (".workbuddy", ".codebuddy", ".workbuddy-ai")
+        )
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            key = str(root).lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(root)
+        return unique
+
+    @staticmethod
+    def _is_loopback_url(value: str) -> bool:
         try:
-            candidates = sorted(
-                sessions.glob("*.json"),
-                key=lambda path: path.stat().st_mtime,
-                reverse=True,
-            )
+            parsed = urlparse(value)
+            if parsed.scheme != "http" or not parsed.hostname or parsed.port is None:
+                return False
+            hostname = parsed.hostname.lower()
+            if hostname == "localhost":
+                return True
+            return ipaddress.ip_address(hostname).is_loopback
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _discovery_mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
         except OSError:
-            return []
+            return 0
+
+    @staticmethod
+    def _session_text_delta(
+        event: dict,
+        session_id: str,
+        message_id: str | None = None,
+    ) -> str | None:
+        """Return text only for the ACP session owned by this request."""
+        if event.get("method") != "session/update":
+            return None
+        params = event.get("params")
+        if not isinstance(params, dict) or params.get("sessionId") != session_id:
+            return None
+        update = params.get("update")
+        if not isinstance(update, dict) or update.get("sessionUpdate") != "agent_message_chunk":
+            return None
+        content = update.get("content")
+        if not isinstance(content, dict) or content.get("type") != "text":
+            return None
+        if message_id:
+            metadata = update.get("_meta")
+            if not isinstance(metadata, dict):
+                return None
+            event_message_id = (
+                update.get("messageId")
+                or metadata.get("codebuddy.ai/messageId")
+                or metadata.get("messageId")
+            )
+            if event_message_id != message_id:
+                return None
+        text = content.get("text")
+        return str(text) if text else None
+
+    @classmethod
+    def discover_all(cls, config_dir: Path | None = None) -> list[str]:
+        candidates: list[Path] = []
+        for root in cls._discovery_roots(config_dir):
+            try:
+                candidates.extend((root / "sessions").glob("*.json"))
+            except OSError:
+                continue
+        candidates.sort(
+            key=WorkBuddyAcpTransport._discovery_mtime,
+            reverse=True,
+        )
         urls = []
         for candidate in candidates:
             try:
@@ -204,7 +281,7 @@ class WorkBuddyAcpTransport:
             if not WorkBuddyAcpTransport._process_is_alive(data.get("pid")):
                 continue
             url = str(data.get("url") or data.get("endpoint") or "").rstrip("/")
-            if url and url not in urls:
+            if url and cls._is_loopback_url(url) and url not in urls:
                 urls.append(url)
         return urls
 
@@ -399,21 +476,31 @@ class WorkBuddyAcpTransport:
                     ):
                         pass
 
+                message_id = f"open-workbuddy-{uuid4().hex}"
+                prompt_meta = {
+                    "codebuddy.ai/requestId": message_id,
+                    "codebuddy.ai/messageRequestId": message_id,
+                    "codebuddy.ai/userMessageId": message_id,
+                    "codebuddy.ai/messageId": message_id,
+                }
                 completed = False
+                emitted = False
                 async for event in self._rpc_stream(
                     client,
                     connection_id,
                     session_token,
                     4,
                     "session/prompt",
-                    {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]},
+                    {
+                        "sessionId": session_id,
+                        "prompt": [{"type": "text", "text": prompt}],
+                        "_meta": prompt_meta,
+                    },
                 ):
-                    if event.get("method") == "session/update":
-                        update = ((event.get("params") or {}).get("update") or {})
-                        if update.get("sessionUpdate") == "agent_message_chunk":
-                            content = update.get("content") or {}
-                            if content.get("type") == "text" and content.get("text"):
-                                yield NormalizedEvent("text_delta", text=str(content["text"]))
+                    text = self._session_text_delta(event, session_id, message_id)
+                    if text:
+                        emitted = True
+                        yield NormalizedEvent("text_delta", text=text)
                     elif event.get("id") == 4:
                         stop_reason = str((event.get("result") or {}).get("stopReason") or "")
                         if stop_reason != "end_turn":
@@ -427,6 +514,12 @@ class WorkBuddyAcpTransport:
                     raise WorkBuddyAcpError(
                         "WorkBuddy ACP prompt ended without completion",
                         category="protocol",
+                    )
+                if not emitted:
+                    raise WorkBuddyAcpError(
+                        "WorkBuddy ACP returned no response for this request",
+                        category="protocol",
+                        retryable=True,
                     )
                 yield NormalizedEvent("completed")
             except asyncio.CancelledError:
