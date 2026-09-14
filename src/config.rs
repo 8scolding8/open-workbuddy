@@ -525,4 +525,3 @@ mod tests {
         assert_eq!(ids, ["deepseek-v4.1-flash", "hy3"]);
     }
 }
-

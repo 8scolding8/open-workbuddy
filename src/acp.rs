@@ -646,4 +646,3 @@ fn network(e: reqwest::Error) -> AcpError {
         AcpError::new("WorkBuddy ACP connection failed", "network").retryable(true)
     }
 }
-
