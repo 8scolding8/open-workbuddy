@@ -364,10 +364,10 @@ fn available_models(environment: &HashMap<String, String>, home: &Path) -> Vec<M
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
             continue;
         };
-        if let Some(models) = runtime_models(&value) {
-            if !models.is_empty() {
-                return models;
-            }
+        if let Some(models) = runtime_models(&value)
+            && !models.is_empty()
+        {
+            return models;
         }
     }
 
@@ -451,13 +451,13 @@ fn runtime_models(value: &Value) -> Option<Vec<ModelInfo>> {
         };
         let models = ordered_ids
             .into_iter()
-            .filter_map(|id| {
+            .map(|id| {
                 let raw = by_id.get(&id.to_lowercase()).copied();
                 let created = raw
                     .and_then(|value| value.get("created"))
                     .and_then(Value::as_i64)
                     .unwrap_or(0);
-                Some(model_info(&id, created))
+                model_info(&id, created)
             })
             .collect::<Vec<_>>();
         if !models.is_empty() {
@@ -525,3 +525,4 @@ mod tests {
         assert_eq!(ids, ["deepseek-v4.1-flash", "hy3"]);
     }
 }
+

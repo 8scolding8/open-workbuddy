@@ -540,10 +540,10 @@ pub fn discover_all(root: Option<&Path>) -> Vec<String> {
     } else {
         let mut roots = Vec::new();
         for name in ["WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR"] {
-            if let Ok(value) = std::env::var(name) {
-                if !value.trim().is_empty() {
-                    roots.push(PathBuf::from(value));
-                }
+            if let Ok(value) = std::env::var(name)
+                && !value.trim().is_empty()
+            {
+                roots.push(PathBuf::from(value));
             }
         }
         if let Some(home) = std::env::home_dir() {
@@ -646,3 +646,4 @@ fn network(e: reqwest::Error) -> AcpError {
         AcpError::new("WorkBuddy ACP connection failed", "network").retryable(true)
     }
 }
+
